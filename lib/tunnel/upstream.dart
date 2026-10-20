@@ -10,6 +10,7 @@ import 'dart:typed_data';
 import 'package:http2/http2.dart';
 
 import '../servers.dart';
+import 'udp_relay.dart' show connectUdpPath;
 import 'upstream_trust.dart';
 
 const _pingInterval = Duration(seconds: 30);
@@ -18,8 +19,11 @@ const _streamWindowBytes = 1024 * 1024;
 
 /// The edge answered a CONNECT with a non-2xx status.
 class UpstreamRejected implements Exception {
-  UpstreamRejected(this.status, {this.authFailure});
+  UpstreamRejected(this.status, {this.authFailure, this.proxyStatus});
   final int status;
+
+  /// The proxy-status header (RFC 9209), e.g. `Fastly; error=destination_ip_prohibited`.
+  final String? proxyStatus;
 
   /// Value of Fastly's x-fastly-proxy-auth-failed header, if present.
   final String? authFailure;
@@ -63,8 +67,13 @@ class TunnelStream {
 class UpstreamSession {
   /// Wraps an already-connected socket carrying HTTP/2 (TLS already done, or
   /// plaintext in tests). Prefer [connect].
-  UpstreamSession.withSocket(Socket socket, {required String token, required this.address})
-    : _socket = socket {
+  UpstreamSession.withSocket(
+    Socket socket, {
+    required String token,
+    required this.address,
+    String? authority,
+  }) : _socket = socket,
+       _authority = authority ?? address.address {
     _token = token;
     final incoming = socket.transform(
       StreamTransformer<Uint8List, List<int>>.fromHandlers(
@@ -108,7 +117,12 @@ class UpstreamSession {
       if (tls.selectedProtocol != 'h2') {
         throw HandshakeException('Server did not negotiate HTTP/2 (got ${tls.selectedProtocol}).');
       }
-      final session = UpstreamSession.withSocket(tls, token: token, address: address);
+      final session = UpstreamSession.withSocket(
+        tls,
+        token: token,
+        address: address,
+        authority: '${server.host}:${server.port}',
+      );
       try {
         await session._conn.onInitialPeerSettingsReceived.timeout(timeout);
       } catch (_) {
@@ -123,15 +137,20 @@ class UpstreamSession {
   }
 
   static Future<InternetAddress> _resolve(String host, Duration timeout) async {
-    final all = await InternetAddress.lookup(host).timeout(timeout);
-    if (all.isEmpty) throw SocketException('No address for $host');
-    return all.firstWhere((a) => a.type == InternetAddressType.IPv4, orElse: () => all.first);
+    // IPv4 only: the pinned address gets a /32 bypass route, which keeps the
+    // proxy connection out of the tunnel. The proxy's IPv6 addresses would be
+    // routed into the TUN (::/1 and 8000::/1), so they are never used.
+    final all = await InternetAddress.lookup(host, type: InternetAddressType.IPv4).timeout(timeout);
+    final v4 = all.where((a) => a.type == InternetAddressType.IPv4);
+    if (v4.isEmpty) throw SocketException('No IPv4 address for $host');
+    return v4.first;
   }
 
   /// The IP actually connected to (the routing layer keeps it outside the VPN).
   final InternetAddress address;
 
   final Socket _socket;
+  final String _authority; // host:port of the proxy, for CONNECT-UDP requests
   late final ClientTransportConnection _conn;
   late final Timer _pingTimer;
   final _done = Completer<void>();
@@ -159,11 +178,39 @@ class UpstreamSession {
     if (token.isNotEmpty) _token = token;
   }
 
+  /// A TCP flow: CONNECT [host]:[port].
   Future<TunnelStream> open(
     String host,
     int port, {
     Duration timeout = const Duration(seconds: 20),
-  }) async {
+  }) {
+    final authority = host.contains(':') ? '[$host]:$port' : '$host:$port';
+    return _openStream(timeout, () => [
+      Header.ascii(':method', 'CONNECT'),
+      Header.ascii(':authority', authority),
+      Header.ascii('proxy-authorization', 'Bearer $_token'),
+    ]);
+  }
+
+  /// A UDP flow (RFC 9298 CONNECT-UDP). The stream carries capsules, see
+  /// udp_relay.dart. The pass current at call time authenticates it.
+  Future<TunnelStream> openUdp(
+    String host,
+    int port, {
+    Duration timeout = const Duration(seconds: 20),
+  }) {
+    return _openStream(timeout, () => [
+      Header.ascii(':method', 'CONNECT'),
+      Header.ascii(':protocol', 'connect-udp'),
+      Header.ascii(':scheme', 'https'),
+      Header.ascii(':authority', _authority),
+      Header.ascii(':path', connectUdpPath(host, port)),
+      Header.ascii('capsule-protocol', '?1'),
+      Header.ascii('proxy-authorization', 'Bearer $_token'),
+    ]);
+  }
+
+  Future<TunnelStream> _openStream(Duration timeout, List<Header> Function() headers) async {
     final deadline = DateTime.now().add(timeout);
     // isOpen is also false while the peer's MAX_CONCURRENT_STREAMS is reached;
     // that is only a reason to wait for a free slot, never to give up.
@@ -175,14 +222,9 @@ class UpstreamSession {
       await Future<void>.delayed(const Duration(milliseconds: 20));
     }
 
-    final authority = host.contains(':') ? '[$host]:$port' : '$host:$port';
     final ClientTransportStream h2;
     try {
-      h2 = _conn.makeRequest([
-        Header.ascii(':method', 'CONNECT'),
-        Header.ascii(':authority', authority),
-        Header.ascii('proxy-authorization', 'Bearer $_token'),
-      ]);
+      h2 = _conn.makeRequest(headers());
     } on StateError {
       // Lost a race with GOAWAY / termination.
       if (_conn.isDraining) throw const UpstreamDraining();
@@ -253,7 +295,11 @@ class UpstreamSession {
     final code = int.tryParse(_header(response, ':status') ?? '') ?? 0;
     if (code < 200 || code >= 300) {
       abort();
-      throw UpstreamRejected(code, authFailure: _header(response, 'x-fastly-proxy-auth-failed'));
+      throw UpstreamRejected(
+        code,
+        authFailure: _header(response, 'x-fastly-proxy-auth-failed'),
+        proxyStatus: _header(response, 'proxy-status'),
+      );
     }
     return TunnelStream(
       incoming: incoming.stream,

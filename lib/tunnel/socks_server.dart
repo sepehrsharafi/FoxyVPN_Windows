@@ -1,35 +1,91 @@
 import 'dart:async';
+import 'dart:collection' show Queue;
 import 'dart:io';
 import 'dart:typed_data';
 
+import '../http_util.dart' show ControlPlane;
 import 'dns.dart';
 import 'loopback_bridge.dart';
+import 'udp_relay.dart';
 import 'upstream.dart';
 
 const _dnsPort = 53;
 const _maxConcurrentDns = 32;
+const _directConnectTimeout = Duration(seconds: 10);
+const _maxLoggedDirect = 1024;
+const _maxQueuedReplies = 512;
+
+/// TCP ports Mozilla's edge tunnels. A refusal on one of these is never
+/// answered with a direct connection.
+const tunnelledTcpPorts = {80, 443, 8443};
 
 /// Local SOCKS5 (no auth) server for tun2socks: CONNECT is relayed into the
-/// tunnel; UDP ASSOCIATE answers DNS (port 53) only and drops other UDP.
+/// tunnel; UDP ASSOCIATE answers DNS (port 53) through the resolver and relays
+/// everything else as CONNECT-UDP flows (when [start] got a `dialUdp`).
 class LocalSocksServer {
-  LocalSocksServer._(this._server, this._dial, this._dns) {
+  LocalSocksServer._(
+    this._server,
+    this._dial,
+    this._dialUdp,
+    this._dns,
+    this._directFallback,
+    this._directSource,
+    this._log,
+    this._udpIdleTimeout,
+    this._maxUdpFlows,
+    this._udpRejections,
+  ) {
     _server.listen(_handle, onError: (_) {});
   }
 
+  /// [dialUdp] opens a CONNECT-UDP stream; without it, non-DNS UDP is dropped.
+  ///
+  /// With [directFallback], a TCP destination the edge refuses (HTTP 502, e.g.
+  /// SSH or mail ports) is dialled straight from the real network adapter
+  /// instead of failing. That traffic is NOT hidden by the VPN. [directSource]
+  /// is the adapter's IPv4 (defaults to `ControlPlane.sourceAddress`, read
+  /// when needed); without one nothing is dialled directly.
   static Future<LocalSocksServer> start({
     required Future<TunnelStream> Function(String host, int port) dial,
     required DnsResolver dns,
+    Future<TunnelStream> Function(String host, int port)? dialUdp,
     int port = 0,
+    bool directFallback = false,
+    InternetAddress? Function()? directSource,
+    void Function(String message)? log,
+    Duration udpIdleTimeout = const Duration(seconds: 60),
+    int maxUdpFlowsPerAssociation = 32,
+    UdpRejectionCache? udpRejections,
   }) async {
     final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, port);
-    return LocalSocksServer._(server, dial, dns);
+    return LocalSocksServer._(
+      server,
+      dial,
+      dialUdp,
+      dns,
+      directFallback,
+      directSource ?? (() => ControlPlane.sourceAddress),
+      log,
+      udpIdleTimeout,
+      maxUdpFlowsPerAssociation,
+      udpRejections ?? UdpRejectionCache(),
+    );
   }
 
   final ServerSocket _server;
   final Future<TunnelStream> Function(String host, int port) _dial;
+  final Future<TunnelStream> Function(String host, int port)? _dialUdp;
   final DnsResolver _dns;
+  final bool _directFallback;
+  final InternetAddress? Function() _directSource;
+  final void Function(String message)? _log;
+  final Duration _udpIdleTimeout;
+  final int _maxUdpFlows;
+  final UdpRejectionCache _udpRejections;
   final _clients = <Socket>{};
+  final _directLogged = <String>{};
 
+  /// Bytes moved through the tunnel (not traffic dialled directly).
   int bytesUp = 0;
   int bytesDown = 0;
 
@@ -83,22 +139,76 @@ class LocalSocksServer {
   }
 
   Future<void> _connect(Socket socket, _Reader reader, String host, int port) async {
-    final TunnelStream tunnel;
+    TunnelStream tunnel;
+    var direct = false;
     try {
       tunnel = await _dial(host, port);
-    } catch (_) {
-      socket.add(_reply(4));
-      await socket.close();
-      return;
+    } catch (e) {
+      // The edge refuses this destination (HTTP 502): "connection refused" (5);
+      // anything else is "host unreachable" (4). Either way the reply is sent
+      // at once and the socket closed, so tun2socks ends the app's connection
+      // right away instead of leaving it hanging.
+      final refused = e is UpstreamRejected && e.status == 502;
+      // Only ports the edge never carries fall back. A 502 on a tunnelled port
+      // is a transient failure (destination down, edge hiccup); dialling it
+      // directly would silently expose ordinary web traffic.
+      final fallback = refused && _directFallback && !tunnelledTcpPorts.contains(port)
+          ? await _dialDirect(host, port)
+          : null;
+      if (fallback == null) {
+        socket.add(_reply(refused ? 5 : 4));
+        await socket.close();
+        return;
+      }
+      tunnel = fallback;
+      direct = true;
     }
     socket.add(_reply(0));
     await pipeSocketAndTunnel(
       socket,
       reader.takeRest(),
       tunnel,
-      onUp: (n) => bytesUp += n,
-      onDown: (n) => bytesDown += n,
+      onUp: direct ? null : (n) => bytesUp += n,
+      onDown: direct ? null : (n) => bytesDown += n,
     );
+  }
+
+  /// Connects around the tunnel, out of the real network adapter. Null if that
+  /// is not possible (no adapter address, wrong address family, connect failed).
+  Future<TunnelStream?> _dialDirect(String host, int port) async {
+    final source = _directSource();
+    if (source == null) return null;
+    try {
+      final InternetAddress target;
+      final literal = InternetAddress.tryParse(host);
+      if (literal != null) {
+        if (literal.type != source.type) return null;
+        target = literal;
+      } else {
+        final found = await InternetAddress.lookup(
+          host,
+          type: source.type,
+        ).timeout(_directConnectTimeout);
+        if (found.isEmpty) return null;
+        target = found.first;
+      }
+      final socket = await Socket.connect(
+        target,
+        port,
+        sourceAddress: source,
+        timeout: _directConnectTimeout,
+      );
+      socket.setOption(SocketOption.tcpNoDelay, true);
+      if (_directLogged.length >= _maxLoggedDirect) _directLogged.clear();
+      if (_directLogged.add('$host:$port')) {
+        _log?.call(
+          "Mozilla's server refuses $host:$port; connecting directly (not hidden by the VPN)",
+        );
+      }
+      return TunnelStream(incoming: socket, outgoing: socket, onAbort: socket.destroy);
+    } catch (_) {
+      return null;
+    }
   }
 
   Future<void> _udpAssociate(Socket socket, _Reader reader) async {
@@ -108,40 +218,138 @@ class LocalSocksServer {
       if (!done.isCompleted) done.complete();
     }
 
+    // RawDatagramSocket.send returns 0 when it would block (it does so after
+    // every datagram or two on Windows): such replies wait for the write event.
+    final outbox = Queue<(Uint8List, InternetAddress, int)>();
+    void pump() {
+      while (outbox.isNotEmpty) {
+        final (data, address, port) = outbox.first;
+        int sent;
+        try {
+          sent = udp.send(data, address, port);
+        } catch (_) {
+          sent = data.length; // gone (closed): drop it
+        }
+        if (sent == 0) {
+          udp.writeEventsEnabled = true;
+          return;
+        }
+        outbox.removeFirst();
+      }
+    }
+
+    void reply(Uint8List data, InternetAddress address, int port) {
+      if (outbox.length >= _maxQueuedReplies) return;
+      outbox.add((data, address, port));
+      pump();
+    }
+
+    final dialUdp = _dialUdp;
+    final relay = dialUdp == null
+        ? null
+        : UdpRelay(
+            dial: dialUdp,
+            deliver: reply,
+            rejections: _udpRejections,
+            idleTimeout: _udpIdleTimeout,
+            maxFlows: _maxUdpFlows,
+            onUp: (n) => bytesUp += n,
+            onDown: (n) => bytesDown += n,
+            log: _log,
+          );
     var inflight = 0;
-    udp.listen((event) {
-      if (event != RawSocketEvent.read) return;
-      final datagram = udp.receive();
-      if (datagram == null || inflight >= _maxConcurrentDns) return;
-      inflight++;
-      _answerDns(udp, datagram).whenComplete(() => inflight--);
-    });
+    void handle(Datagram datagram) {
+      final target = parseSocksUdpHeader(datagram.data);
+      if (target == null || datagram.data.length <= target.headerLength) return;
+      if (target.port == _dnsPort) {
+        // Mozilla's edge prohibits UDP port 53: DNS goes over DoH instead.
+        if (inflight >= _maxConcurrentDns) return;
+        inflight++;
+        _answerDns(reply, datagram, target).whenComplete(() => inflight--);
+      } else {
+        relay?.send(
+          host: target.host,
+          port: target.port,
+          header: Uint8List.fromList(datagram.data.sublist(0, target.headerLength)),
+          payload: Uint8List.fromList(datagram.data.sublist(target.headerLength)),
+          clientAddress: datagram.address,
+          clientPort: datagram.port,
+        );
+      }
+    }
+
+    udp.listen(
+      (event) {
+        if (event == RawSocketEvent.write) return pump();
+        if (event != RawSocketEvent.read) return;
+        // A burst raises one event: read until the socket is empty.
+        Datagram? datagram;
+        while ((datagram = udp.receive()) != null) {
+          handle(datagram!);
+        }
+      },
+      // On Windows a datagram sent to a closed loopback port (the client's)
+      // comes back as WSAECONNRESET on this socket. Harmless: the association
+      // lasts as long as its TCP control connection.
+      onError: (Object e) => _log?.call('SOCKS UDP socket error (ignored): $e'),
+      cancelOnError: false,
+    );
     socket.add(_reply(0, address: InternetAddress.loopbackIPv4, port: udp.port));
     // The association lasts as long as the TCP control connection.
     reader.takeRest().listen((_) {}, onError: (_) => finish(), onDone: finish);
     socket.done.then((_) => finish(), onError: (_) => finish());
     await done.future;
+    relay?.close();
     udp.close();
     socket.destroy();
   }
 
-  Future<void> _answerDns(RawDatagramSocket udp, Datagram datagram) async {
+  Future<void> _answerDns(UdpDeliver reply, Datagram datagram, SocksUdpTarget target) async {
     try {
       final data = datagram.data;
-      if (data.length < 10 || data[2] != 0) return; // fragments are not supported
-      final headerLength = switch (data[3]) {
-        1 => 4 + 4 + 2,
-        4 => 4 + 16 + 2,
-        3 => 4 + 1 + data[4] + 2,
-        _ => 0,
-      };
-      if (headerLength == 0 || data.length <= headerLength) return;
-      final destPort = (data[headerLength - 2] << 8) | data[headerLength - 1];
-      if (destPort != _dnsPort) return;
-      final answer = await _dns.resolve(Uint8List.sublistView(data, headerLength));
-      udp.send([...data.sublist(0, headerLength), ...answer], datagram.address, datagram.port);
+      final answer = await _dns.resolve(Uint8List.sublistView(data, target.headerLength));
+      reply(
+        Uint8List.fromList([...data.sublist(0, target.headerLength), ...answer]),
+        datagram.address,
+        datagram.port,
+      );
     } catch (_) {}
   }
+}
+
+/// Where a SOCKS5 UDP datagram (RFC 1928 section 7) is addressed.
+class SocksUdpTarget {
+  const SocksUdpTarget(this.host, this.port, this.headerLength);
+  final String host;
+  final int port;
+
+  /// Bytes of the header (RSV, FRAG, ATYP, address, port); the payload follows.
+  final int headerLength;
+}
+
+/// Parses the header of a SOCKS5 UDP datagram. Null if it is malformed, has an
+/// unknown address type, or is a fragment (FRAG != 0, not supported).
+SocksUdpTarget? parseSocksUdpHeader(Uint8List data) {
+  if (data.length < 10 || data[2] != 0) return null;
+  final int headerLength;
+  final String host;
+  switch (data[3]) {
+    case 1:
+      headerLength = 4 + 4 + 2;
+      host = data.sublist(4, 8).join('.');
+    case 4:
+      headerLength = 4 + 16 + 2;
+      if (data.length < headerLength) return null;
+      host = InternetAddress.fromRawAddress(Uint8List.fromList(data.sublist(4, 20))).address;
+    case 3:
+      headerLength = 4 + 1 + data[4] + 2;
+      if (data.length < headerLength) return null;
+      host = String.fromCharCodes(data.sublist(5, 5 + data[4]));
+    default:
+      return null;
+  }
+  final port = (data[headerLength - 2] << 8) | data[headerLength - 1];
+  return SocksUdpTarget(host, port, headerLength);
 }
 
 Future<(String, int)> _readAddress(_Reader reader, int type) async {

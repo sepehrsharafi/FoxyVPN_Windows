@@ -4,6 +4,12 @@
 
 #include "flutter/generated_plugin_registrant.h"
 
+namespace {
+// Timer that shows the window if Dart has not done so (see OnCreate).
+constexpr UINT_PTR kShowFallbackTimerId = 0x464F58;  // "FOX"
+constexpr UINT kShowFallbackDelayMs = 3000;
+}  // namespace
+
 FlutterWindow::FlutterWindow(const flutter::DartProject& project)
     : project_(project) {}
 
@@ -27,8 +33,14 @@ bool FlutterWindow::OnCreate() {
   RegisterPlugins(flutter_controller_->engine());
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
+  // The window stays hidden after the first frame: window_manager (see
+  // lib/main.dart) applies the size, the hidden title bar and the dark
+  // background first and then shows it, so nothing flashes. If that never
+  // happens (Dart failed before it got there) a timer shows the window
+  // anyway, so the app can never stay running with no window.
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
-    this->Show();
+    ::SetTimer(this->GetHandle(), kShowFallbackTimerId, kShowFallbackDelayMs,
+               nullptr);
   });
 
   // Flutter can complete the first frame before the "show window" callback is
@@ -51,6 +63,16 @@ LRESULT
 FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               WPARAM const wparam,
                               LPARAM const lparam) noexcept {
+  // Safety net for a window that is still hidden a few seconds after the
+  // first frame. Checked first so that no plugin can swallow it.
+  if (message == WM_TIMER && wparam == kShowFallbackTimerId) {
+    ::KillTimer(hwnd, kShowFallbackTimerId);
+    if (!::IsWindowVisible(hwnd)) {
+      this->Show();
+    }
+    return 0;
+  }
+
   // Give Flutter, including plugins, an opportunity to handle window messages.
   if (flutter_controller_) {
     std::optional<LRESULT> result =

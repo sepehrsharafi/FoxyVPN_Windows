@@ -696,6 +696,65 @@ void main() {
       );
     });
 
+    test('UDP goes out as CONNECT-UDP with the current pass and comes back', () async {
+      final session = await VpnSession.start(account: account, location: location());
+      addTearDown(session.stop);
+      final control = await socksTo(session);
+      final reply = await control.request(3, [1, 0, 0, 0, 0, 0, 0]);
+      final udpPort = (reply[8] << 8) | reply[9];
+      final udp = await RawDatagramSocket.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(udp.close);
+      final inbox = <Datagram>[];
+      udp.listen((e) {
+        if (e == RawSocketEvent.read) {
+          Datagram? d;
+          while ((d = udp.receive()) != null) {
+            inbox.add(d!);
+          }
+        }
+      });
+      final header = [0, 0, 0, 1, 1, 1, 1, 1, 0x01, 0xbb];
+      udp.send([...header, 7, 8, 9], InternetAddress.loopbackIPv4, udpPort);
+      await _until(() => inbox.isNotEmpty);
+      // The test edge echoes the capsule bytes, so the datagram comes back unchanged.
+      expect(inbox.single.data, [...header, 7, 8, 9]);
+      expect(authHeaders.single, 'Bearer pass-1');
+      expect(session.bytesUp, 3);
+      expect(session.bytesDown, 3);
+      control.socket.destroy();
+    });
+
+    test('with direct fallback on, a TCP port the edge refuses (502) is dialled directly', () async {
+      final target = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(target.close);
+      target.listen((s) => s.listen((d) => s.add([...utf8.encode('direct:'), ...d])));
+      ControlPlane.sourceAddress = InternetAddress.loopbackIPv4;
+      status = 502;
+      final logs = <String>[];
+      final session = await VpnSession.start(
+        account: account,
+        location: location(),
+        directFallback: true,
+        log: logs.add,
+      );
+      addTearDown(session.stop);
+      final client = await socksTo(session);
+      client.socket.add([5, 1, 0, 1, 127, 0, 0, 1, target.port >> 8, target.port & 0xff]);
+      expect((await client.read(10))[1], 0);
+      client.socket.add(utf8.encode('x'));
+      expect(utf8.decode(await client.read(8)), 'direct:x');
+      expect(session.bytesUp + session.bytesDown, 0, reason: 'direct traffic is not tunnel traffic');
+      expect(logs.where((l) => l.contains('not hidden')), hasLength(1));
+      client.socket.destroy();
+
+      // Off (the default): the same refusal is passed on as "connection refused".
+      final strict = await VpnSession.start(account: account, location: location());
+      addTearDown(strict.stop);
+      final other = await socksTo(strict);
+      other.socket.add([5, 1, 0, 1, 127, 0, 0, 1, target.port >> 8, target.port & 0xff]);
+      expect((await other.read(10))[1], 5);
+    });
+
     test('stop closes the SOCKS port and the upstream', () async {
       final session = await VpnSession.start(account: account, location: location());
       final port = session.socksPort;

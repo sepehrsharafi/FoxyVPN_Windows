@@ -7,6 +7,7 @@ import '../guardian.dart';
 import '../http_util.dart' show ControlPlane;
 import '../servers.dart';
 import 'dns.dart';
+import 'exit_check.dart';
 import 'socks_server.dart';
 import 'upstream.dart';
 
@@ -38,11 +39,12 @@ class VpnSession {
   /// How upstream connections are made; replaced in tests.
   static UpstreamConnector connector = UpstreamSession.connect;
 
-  VpnSession._(this._account, this._log, this._beforeReconnect);
+  VpnSession._(this._account, this._log, this._beforeReconnect, this._directFallback);
 
   final Account _account;
   final void Function(String message)? _log;
   final Future<void> Function()? _beforeReconnect;
+  final bool _directFallback;
 
   late final ServerNode _node;
   late final InternetAddress _pinned;
@@ -57,6 +59,7 @@ class VpnSession {
   Future<void>? _renewing;
   String _token = '';
   int? _quotaAtFetch;
+  int? _quotaMax;
   DateTime? _quotaResetsAt;
   int _bytesAtFetch = 0;
   VpnPhase _phase = VpnPhase.connecting;
@@ -72,8 +75,12 @@ class VpnSession {
     /// Awaited (errors are logged and ignored) before each reconnect attempt,
     /// e.g. to refresh the route that keeps the upstream IP outside the tunnel.
     Future<void> Function()? beforeReconnect,
+
+    /// Dial TCP destinations that Mozilla refuses (HTTP 502) directly instead,
+    /// out of the real network adapter. Those flows are not hidden by the VPN.
+    bool directFallback = false,
   }) async {
-    final session = VpnSession._(account, log, beforeReconnect);
+    final session = VpnSession._(account, log, beforeReconnect, directFallback);
     try {
       await session._start(location);
       return session;
@@ -111,8 +118,20 @@ class VpnSession {
     return base > used ? base - used : 0;
   }
 
+  /// The monthly allowance in total, if Mozilla told us.
+  int? get quotaMax => _quotaMax;
+
   /// When Mozilla resets the monthly allowance, if it told us.
   DateTime? get quotaResetsAt => _quotaResetsAt;
+
+  /// A plain HTTPS GET to [host] whose TCP connection is dialled through the
+  /// tunnel (so the server sees the exit IP). Returns the body of a 200 answer;
+  /// throws otherwise, and on timeout.
+  Future<String> httpsGetThroughTunnel(
+    String host,
+    String path, {
+    Duration timeout = const Duration(seconds: 10),
+  }) => httpsGetVia(_dial, host, path, timeout: timeout);
 
   Future<void> stop() async {
     if (_stopped) return;
@@ -165,7 +184,13 @@ class VpnSession {
     await ControlPlane.pin(const ['vpn.mozilla.org', 'api.accounts.firefox.com']);
 
     _dns = DnsResolver(_dial);
-    _socks = await LocalSocksServer.start(dial: _dial, dns: _dns);
+    _socks = await LocalSocksServer.start(
+      dial: _dial,
+      dialUdp: _dialUdp,
+      dns: _dns,
+      directFallback: _directFallback,
+      log: _log,
+    );
     _setPhase(VpnPhase.connected);
     _log?.call('Connected via ${_node.host} ($_pinned); SOCKS on 127.0.0.1:$socksPort');
   }
@@ -181,6 +206,7 @@ class VpnSession {
     if (_stopped) return;
     _token = pass.token;
     _quotaAtFetch = pass.quotaRemaining;
+    _quotaMax = pass.quotaMax ?? _quotaMax;
     _quotaResetsAt = pass.quotaResetsAt ?? _quotaResetsAt;
     _bytesAtFetch = _stopped || !_socksReady ? 0 : bytesUp + bytesDown;
     _upstream?.updateToken(pass.token);
@@ -227,13 +253,20 @@ class VpnSession {
     _renewTimer = Timer(const Duration(seconds: 30), _renewPass);
   }
 
-  Future<TunnelStream> _dial(String host, int port) async {
+  Future<TunnelStream> _dial(String host, int port) =>
+      _dialVia((upstream) => upstream.open(host, port));
+
+  /// A CONNECT-UDP flow, authenticated with the pass current at this moment.
+  Future<TunnelStream> _dialUdp(String host, int port) =>
+      _dialVia((upstream) => upstream.openUdp(host, port));
+
+  Future<TunnelStream> _dialVia(Future<TunnelStream> Function(UpstreamSession) open) async {
     var retriedToken = false;
     var drainRetries = 0;
     while (true) {
       final upstream = await _readyUpstream();
       try {
-        return await upstream.open(host, port);
+        return await open(upstream);
       } on UpstreamDraining {
         if (++drainRetries > 3) rethrow;
       } on UpstreamRejected catch (e) {

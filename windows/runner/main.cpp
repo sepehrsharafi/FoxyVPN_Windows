@@ -26,7 +26,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
 
   FlutterWindow window(project);
   Win32Window::Point origin(100, 100);
-  Win32Window::Size size(420, 720);
+  Win32Window::Size size(400, 720);
   if (!window.Create(L"FoxyVPN", origin, size)) {
     return EXIT_FAILURE;
   }

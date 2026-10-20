@@ -1,6 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:foxyvpn/guardian.dart';
-import 'package:foxyvpn/main.dart';
+import 'package:foxyvpn/format.dart';
 
 void main() {
   final now = DateTime(2026, 10, 20, 12);
