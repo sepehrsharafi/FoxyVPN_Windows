@@ -1,0 +1,84 @@
+name: Build Windows app
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  # Pinned third-party binaries (checksums computed from the official downloads).
+  TUN2SOCKS_VERSION: v2.7.0
+  TUN2SOCKS_ZIP_SHA256: c5d46e9452f6c9cc7c15ab9158d6d6a0169ceecd6bca019ce476b49337d2be43
+  TUN2SOCKS_LICENSE_SHA256: 796abbf6d0258a01321f88f72c1d712417acdd75342510f0796f7c567b6f05e5
+  WINTUN_ZIP_SHA256: 07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.47.4
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+      - run: flutter analyze
+      - run: flutter test
+      - run: flutter build windows --release
+
+      - name: Add tun2socks and Wintun next to foxyvpn.exe
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $release = 'build/windows/x64/runner/Release'
+          $dl = Join-Path $env:RUNNER_TEMP 'fxdl'
+          New-Item -ItemType Directory -Force $dl | Out-Null
+
+          function Get-Verified($url, $file, $sha256) {
+            Invoke-WebRequest $url -OutFile $file
+            $actual = (Get-FileHash $file -Algorithm SHA256).Hash.ToLower()
+            if ($actual -ne $sha256) { throw "Checksum mismatch for ${url}: $actual" }
+          }
+
+          # tun2socks (MIT) - https://github.com/xjasonlyu/tun2socks
+          $base = "https://github.com/xjasonlyu/tun2socks"
+          Get-Verified "$base/releases/download/$env:TUN2SOCKS_VERSION/tun2socks-windows-amd64.zip" "$dl/tun2socks.zip" $env:TUN2SOCKS_ZIP_SHA256
+          Get-Verified "https://raw.githubusercontent.com/xjasonlyu/tun2socks/$env:TUN2SOCKS_VERSION/LICENSE" "$dl/LICENSE-tun2socks.txt" $env:TUN2SOCKS_LICENSE_SHA256
+          Expand-Archive "$dl/tun2socks.zip" "$dl/tun2socks"
+          Copy-Item "$dl/tun2socks/tun2socks-windows-amd64.exe" "$release/tun2socks.exe"
+
+          # Wintun driver DLL - https://www.wintun.net
+          Get-Verified "https://www.wintun.net/builds/wintun-0.14.1.zip" "$dl/wintun.zip" $env:WINTUN_ZIP_SHA256
+          Expand-Archive "$dl/wintun.zip" "$dl/wintun"
+          Copy-Item "$dl/wintun/wintun/bin/amd64/wintun.dll" "$release/wintun.dll"
+
+          # Licenses
+          New-Item -ItemType Directory -Force "$release/licenses" | Out-Null
+          Copy-Item "$dl/LICENSE-tun2socks.txt" "$release/licenses/tun2socks-LICENSE.txt"
+          Copy-Item "$dl/wintun/wintun/LICENSE.txt" "$release/licenses/wintun-LICENSE.txt"
+          Copy-Item LICENSE "$release/licenses/FoxyVPN-LICENSE.txt"
+
+          foreach ($f in 'foxyvpn.exe', 'tun2socks.exe', 'wintun.dll') {
+            if (-not (Test-Path "$release/$f")) { throw "$f is missing from the release folder" }
+          }
+
+          # Zip it as FoxyVPN-Windows.zip (kept outside the folder so it is not zipped into itself).
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path "$release/*" -DestinationPath dist/FoxyVPN-Windows.zip
+
+      # The folder, for people who prefer to see the files.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FoxyVPN-Windows
+          path: build/windows/x64/runner/Release/
+          retention-days: 14
+
+      # The same thing as one zip.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FoxyVPN-Windows-zip
+          path: dist/FoxyVPN-Windows.zip
+          retention-days: 14

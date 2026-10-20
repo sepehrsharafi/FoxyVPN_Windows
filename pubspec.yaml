@@ -1,0 +1,28 @@
+name: foxyvpn
+description: "A new Flutter project."
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.13.3
+
+dependencies:
+  crypto: ^3.0.7
+  ffi: ^2.2.0
+  flutter:
+    sdk: flutter
+  http2: ^3.1.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+# http2 3.1.0 with a larger, receipt-credited connection flow-control window
+# (see third_party/http2/PATCHES.md).
+dependency_overrides:
+  http2:
+    path: third_party/http2
+
+flutter:
+  uses-material-design: true
