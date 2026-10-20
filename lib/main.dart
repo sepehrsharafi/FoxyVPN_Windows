@@ -270,7 +270,7 @@ class _LocationsScreenState extends State<LocationsScreen> {
     if (session != null) {
       lines.add(Text('$_phaseText · ${formatBytes(session.bytesUp + session.bytesDown)} used this session', style: style));
       final left = session.quotaRemaining;
-      if (left != null) lines.add(Text('${formatBytes(left)} left this month', style: style));
+      if (left != null) lines.add(Text(quotaText(left, session.quotaResetsAt), style: style));
     }
     if (lines.isEmpty) return const SizedBox.shrink();
     return Padding(
@@ -285,7 +285,7 @@ class _LocationsScreenState extends State<LocationsScreen> {
     try {
       final pass = await widget.account.proxyPass();
       final left = pass.quotaRemaining;
-      status = left == null ? 'Signed in' : '${formatBytes(left)} left this month';
+      status = left == null ? 'Signed in' : quotaText(left, pass.quotaResetsAt);
     } catch (e) {
       AppLog.write('Account check failed: $e');
       status = friendlyError(e);
@@ -484,4 +484,22 @@ String formatBytes(int bytes) {
     unit++;
   }
   return '${value.toStringAsFixed(unit == 0 ? 0 : 1)} ${units[unit]}';
+}
+
+/// "11.2 GB left this month · resets 1 Nov" (time added when it's within a day).
+String quotaText(int bytesLeft, DateTime? resetsAt, {DateTime? now}) {
+  final left = '${formatBytes(bytesLeft)} left this month';
+  if (resetsAt == null) return left;
+  return '$left · resets ${formatResetDate(resetsAt.toLocal(), now: now)}';
+}
+
+String formatResetDate(DateTime date, {DateTime? now}) {
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  final current = now ?? DateTime.now();
+  var text = '${date.day} ${months[date.month - 1]}';
+  if (date.year != current.year) text += ' ${date.year}';
+  if (date.difference(current).inHours < 24) {
+    text += ', ${date.hour.toString().padLeft(2, '0')}:${date.minute.toString().padLeft(2, '0')}';
+  }
+  return text;
 }

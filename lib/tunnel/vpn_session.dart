@@ -57,6 +57,7 @@ class VpnSession {
   Future<void>? _renewing;
   String _token = '';
   int? _quotaAtFetch;
+  DateTime? _quotaResetsAt;
   int _bytesAtFetch = 0;
   VpnPhase _phase = VpnPhase.connecting;
   bool _stopped = false;
@@ -109,6 +110,9 @@ class VpnSession {
     final used = bytesUp + bytesDown - _bytesAtFetch;
     return base > used ? base - used : 0;
   }
+
+  /// When Mozilla resets the monthly allowance, if it told us.
+  DateTime? get quotaResetsAt => _quotaResetsAt;
 
   Future<void> stop() async {
     if (_stopped) return;
@@ -177,6 +181,7 @@ class VpnSession {
     if (_stopped) return;
     _token = pass.token;
     _quotaAtFetch = pass.quotaRemaining;
+    _quotaResetsAt = pass.quotaResetsAt ?? _quotaResetsAt;
     _bytesAtFetch = _stopped || !_socksReady ? 0 : bytesUp + bytesDown;
     _upstream?.updateToken(pass.token);
     final expiry = pass.expiresAt;

@@ -25,11 +25,25 @@ class TokenRejected extends GuardianError {
 }
 
 class ProxyPass {
-  ProxyPass({required this.token, this.expiresAt, this.quotaMax, this.quotaRemaining});
+  ProxyPass({required this.token, this.expiresAt, this.quotaMax, this.quotaRemaining, this.quotaResetsAt});
   final String token;
   final DateTime? expiresAt;
   final int? quotaMax;
   final int? quotaRemaining;
+  final DateTime? quotaResetsAt;
+}
+
+/// Parses Mozilla's X-Quota-Reset header. Its format isn't documented, so accept
+/// epoch seconds or milliseconds, seconds-until-reset, or an ISO-8601 date.
+DateTime? parseQuotaReset(String? value, {DateTime? now}) {
+  final text = value?.trim() ?? '';
+  if (text.isEmpty) return null;
+  final number = int.tryParse(text);
+  if (number == null) return DateTime.tryParse(text)?.toLocal();
+  if (number <= 0) return null;
+  if (number > 100000000000) return DateTime.fromMillisecondsSinceEpoch(number);
+  if (number > 1000000000) return DateTime.fromMillisecondsSinceEpoch(number * 1000);
+  return (now ?? DateTime.now()).add(Duration(seconds: number));
 }
 
 class GuardianClient {
@@ -57,6 +71,7 @@ class GuardianClient {
           : _jwtExpiry(token),
       quotaMax: header('x-quota-limit'),
       quotaRemaining: header('x-quota-remaining'),
+      quotaResetsAt: parseQuotaReset(response.headers.value('x-quota-reset')),
     );
   }
 

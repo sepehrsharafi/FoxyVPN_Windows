@@ -92,10 +92,16 @@ Aktive Routen:
 
     test('tun2socks arguments', () {
       expect(tun2socksArgs(1080), [
-        '-device', 'tun://FoxyVPN',
-        '-proxy', 'socks5://127.0.0.1:1080',
-        '-loglevel', 'warn',
+        '--device', 'tun://FoxyVPN',
+        '--proxy', 'socks5://127.0.0.1:1080',
+        '--loglevel', 'warn',
       ]);
+    });
+
+    test('tun2socks failure summary keeps only the last line, not the usage text', () {
+      expect(tun2socksFailureSummary(['Usage of tun2socks.exe:', '  -d, --device string', "unknown shorthand flag: 'l'"]),
+          "unknown shorthand flag: 'l'");
+      expect(tun2socksFailureSummary([]), '');
     });
 
     test('setup covers address, DNS, metric and both IP versions, all non-persistent', () {

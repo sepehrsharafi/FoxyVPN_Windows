@@ -402,12 +402,17 @@ List<Cmd> tunTeardownCmds() => [
     ]),
 ];
 
+/// The last line tun2socks printed: its actual error, without the usage text
+/// it dumps first. The full output is in the log.
+String tun2socksFailureSummary(List<String> output) => output.isEmpty ? '' : output.last.trim();
+
+// tun2socks uses GNU-style flags: long names need two dashes.
 List<String> tun2socksArgs(int socksPort) => [
-  '-device',
+  '--device',
   'tun://$tunName',
-  '-proxy',
+  '--proxy',
   'socks5://127.0.0.1:$socksPort',
-  '-loglevel',
+  '--loglevel',
   'warn',
 ];
 
@@ -755,7 +760,7 @@ class WindowsTun {
     while (DateTime.now().isBefore(deadline)) {
       if (_exited.isCompleted) {
         throw TunError(
-          'The tunnel program stopped right away. ${_lastOutput.isEmpty ? '' : lastOutput}'.trim(),
+          'The tunnel program stopped right away. ${tun2socksFailureSummary(_lastOutput)}'.trim(),
         );
       }
       final out =
