@@ -6,7 +6,7 @@ import java.io.File
 /**
  * The configuration file for hev-socks5-tunnel (YAML).
  *
- * Choices (see lib/platform/android_tun.dart and DESIGN.md "Android"):
+ * Choices (see lib/platform/android_tun.dart and docs/DESIGN.md "Android"):
  *  - UDP goes out as SOCKS5 UDP ASSOCIATE to our own server. That server answers
  *    port 53 itself through DNS-over-HTTPS and relays everything else as
  *    CONNECT-UDP, exactly like on Windows. So the VPN's DNS server

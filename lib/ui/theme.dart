@@ -4,7 +4,7 @@ import 'package:flutter/services.dart' show rootBundle;
 
 import '../platform/host.dart';
 
-/// Colour tokens from DESIGN.md. Dark only, on a true black base.
+/// Colour tokens from docs/DESIGN.md. Dark only, on a true black base.
 ///
 /// Rule: [accent] never decorates. If something is mint, you are protected
 /// (or it is the one button to press).
