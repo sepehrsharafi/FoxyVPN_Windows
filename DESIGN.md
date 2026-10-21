@@ -55,8 +55,10 @@ Rules:
 - 8 pt grid. Screen padding 24. Panel and card radius 20, inner tiles and grid cards 14, inputs and
   buttons 12, chips 8, pills fully round.
 - Cards: `surface` fill plus a 1 px `line` border. No drop shadows.
-- Motion: 180–240 ms ease-out on state changes (colour, ring, page slide). Nothing loops except the
-  connecting ring and the tiny spinner of a ping that is still being measured.
+- Motion: 180–240 ms ease-out on state changes (colour, ring). Pages open and close with Android's zoom
+  transition (the new page grows in from slightly smaller while fading in, the old one grows a touch and
+  fades; both are snapshotted while moving). The back gesture and button just play the closing motion.
+  Nothing loops except the connecting ring and the tiny spinner of a ping that is still being measured.
 - Dialogs: centred, radius 20, `surface` with a `line` border, at most 340 wide, over a `bg` barrier at
   70 %. A 40 px tinted circle with a line icon, a 16 / 700 title, body text, and two equal buttons
   (secondary left, primary right; stacked, primary first, at large text). The primary button takes
@@ -94,11 +96,13 @@ Top to bottom:
 1. Title bar.
 2. **Top row:** caption on the left with only the data left ("11.0 GB left"; zero is "No data left" in
    `danger`; the reset date lives on the Account page), round avatar button on the right (the email's
-   first letter) → Account. Left of the avatar sits a **reserved 40 px slot**: while another proxy or
+   first letter, or a line person glyph when the email is unknown) → Account. Left of the avatar sits a **reserved 40 px slot**: while another proxy or
    VPN is active it holds a `warn` alert icon in a circle like the avatar's (tooltip "Another proxy or
    VPN is active") that reopens the conflict dialog. The slot is always there, so the icon appearing
    moves nothing.
 3. **Big session timer** `00:41:51` (46 / 700, tabular). `00:00:00` in `textFaint` when there is no session.
+   Each digit that changes rolls like an odometer (460 ms ease-out: the old digit drops out below, the
+   new one rolls in from above, inside the digit's own clip). Ticks on whole seconds of the session.
 4. **Status pill** directly under it, text only (no icons):
    - protected: `accent` at ~14 % fill, mint text "Protected"
    - not protected: neutral `surface` pill with a `line` border, "Not protected"
@@ -134,23 +138,28 @@ Top to bottom:
 - Never two dialogs: a drop closes an open conflict dialog first, and a conflict dialog waits until
   the drop dialog is gone. Dialogs open over whichever page is showing.
 
-### 3. Locations (slides in from the right)
+### 3. Locations
 - Header: back arrow, title "Locations", refresh icon (disabled while connected).
 - Search field (filters by country or city). Esc clears it, a second Esc goes back.
-- **Recommended** first, full width, with the fox mark and its ping on the right. Then an
-  "ALL LOCATIONS" label and a **2-column grid** (352 px = 2 × 170 + 12 gap), sorted by ping, no reply last.
-- Each card (radius 14, `surface`, `line` border, 12 px padding): a circular flag top-left; top-right
-  the ping ("31 ms", tabular, 13 / 600 `textDim`); the country name (600/700)
-  at the bottom, and under it the city in `textDim`, only for countries with several cities (one card
-  per city). With a single city that line stays empty, so every card has the same height and the
-  names line up.
+- **Recommended** first, full width: the fox mark, "Recommended", and a line "24 ms · Fastest ·
+  Sweden". It connects to the **fastest location right now** (lowest ping among the real locations);
+  only when none answered does it use Mozilla's own pick ("Mozilla's pick"). Its ping is that
+  location's ping, so it is never slower than a card below it. Then an "ALL LOCATIONS" label and a
+  **2-column grid** (10 px gaps), sorted by ping, no reply last.
+- Each card (radius 14, `surface`, `line` border, 12 px padding) is one compact row: a 30 px circular
+  flag, then the country name (15 / 700) over the ping ("31 ms", tabular, 13 / 600 `textDim`) and,
+  for countries with several cities, " · City". No dead space: the card is exactly as tall as its
+  two lines.
 - **The ping is always visible**, on every card including the selected one and Recommended. No reply:
-  "No reply" in `textFaint`. Still being measured: a tiny spinner. Every location, Recommended included, is pinged at its first server.
+  "No reply" in `textFaint`. Still being measured: a tiny spinner. Refresh: every ping turns into a spinner at
+  once and the refresh icon turns; each figure fades in as it arrives, the ping line keeps one text line's
+  height (nothing on the card moves), and the grid holds its order until every reply is in, then reorders once.
 - **Selection state:** `surfaceHi` fill plus a 1 px `textDim` border. No tick.
-  **Hover:** a lighter fill only, no border change (so it never looks selected). Keyboard focus: the
-  neutral focus ring. The two states are told apart by the border, hover by the fill.
+  **Hover:** a lighter fill and `lineHi` hairline (so it never looks selected). Keyboard focus: the
+  neutral focus ring.
 - Card height follows the text scale; every card is a Tab stop in reading order (Enter picks it).
-- No signal bars anywhere: the ping figure alone carries the information.
+- Flags are rasterised once per size and cached (the vector art is never re-parsed while scrolling);
+  Home draws them in the background, a frame apart, as soon as the list arrives.
 - Tap/click selects and goes back. While connected: picking a different location reconnects to it.
 
 ### 4. Account
@@ -193,7 +202,7 @@ bypass routes. Always-on VPN and "Block connections without VPN" work (the servi
 
 **Process model (engine lifetime).** The tunnel core runs in one Flutter engine that does not belong to the
 Activity: it lives in `FlutterEngineCache` (`FoxyEngine`), the Activity only attaches to it, and the
-foreground service (ongoing notification "Protected · Austria" with a Disconnect action, type
+foreground service (ongoing notification, readable collapsed: title "Austria", line "↓ 1.2 MB/s   ↑ 84 KB/s   ·   312 MB" from hev's own counters, refreshed each second only while the screen is on; Disconnect action; type
 `specialUse`) keeps the process, and so the engine, alive. Swiping the app away or turning the screen off
 does not stop the VPN; reopening the app attaches to the running engine. With the VPN off, the engine is
 destroyed when the Activity finishes. No wake lock. Dart and Kotlin talk over one MethodChannel
@@ -202,7 +211,7 @@ Android Keystore AES-GCM key (`SecureStore`), the Android twin of the Windows DP
 **Quick Settings tile.** `FoxyTileService` (`vpn/FoxyTileService.kt`, label "FoxyVPN", icon
 `ic_stat_foxy`, `BIND_QUICK_SETTINGS_TILE`). Tap while off: pings every location and connects to the
 fastest. Tap while connecting or connected: disconnects. Subtitle: "Tap for fastest" (inactive), "Connecting…"
-or "Protected · Austria" (active; connecting stays active so the tile reads "on" and a tap switches it off),
+or "Austria" (active; connecting stays active so the tile reads "on" and a tap switches it off),
 "Disconnecting…", and "Sign in first" when signed out (inactive, not unavailable: Android drops taps on an
 unavailable tile, and the tap is what opens the app to sign in).
 It is a *passive* tile (no `ACTIVE_TILE`): the system binds it every time the panel opens, so

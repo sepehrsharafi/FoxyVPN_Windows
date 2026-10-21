@@ -12,6 +12,7 @@ import '../widgets/error_notice.dart';
 import '../widgets/foxy_icon.dart';
 import '../widgets/foxy_route.dart';
 import '../widgets/notice_dialogs.dart';
+import '../widgets/odometer_text.dart';
 import '../widgets/power_switch.dart';
 import '../widgets/pressable.dart';
 import '../widgets/signal_bars.dart';
@@ -44,6 +45,27 @@ class _HomeScreenState extends State<HomeScreen> {
   void initState() {
     super.initState();
     _notices = _makeNotices()..attach();
+    controller.addListener(_warmFlags);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _warmFlags());
+  }
+
+  final _warmed = <String>{};
+
+  /// Draws the Locations page's flags in the background once the list is in,
+  /// a frame apart, so opening that page doesn't have to.
+  void _warmFlags() {
+    if (!mounted) return;
+    final fresh = [
+      for (final l in controller.locations)
+        if (_warmed.add(l.countryCode.toUpperCase())) l.countryCode.toUpperCase(),
+    ];
+    if (fresh.isEmpty) return;
+    final px = (LocationsScreen.flagSize * MediaQuery.devicePixelRatioOf(context)).round();
+    unawaited(
+      FlagCache.warmUp([
+        for (final code in fresh) (code, px, px),
+      ]),
+    );
   }
 
   @override
@@ -52,11 +74,14 @@ class _HomeScreenState extends State<HomeScreen> {
     if (old.controller != widget.controller) {
       _notices.detach();
       _notices = _makeNotices()..attach();
+      old.controller.removeListener(_warmFlags);
+      widget.controller.addListener(_warmFlags);
     }
   }
 
   @override
   void dispose() {
+    controller.removeListener(_warmFlags);
     _notices.detach();
     super.dispose();
   }
@@ -114,7 +139,10 @@ class _HomeScreenState extends State<HomeScreen> {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  PowerSwitch(state: c.state, size: size, onTap: () => _onSwitch(context)),
+                  // Its spinning arc and glow repaint on their own layer, not the page's.
+                  RepaintBoundary(
+                    child: PowerSwitch(state: c.state, size: size, onTap: () => _onSwitch(context)),
+                  ),
                   const SizedBox(height: 16),
                   _HintLine(controller: c),
                 ],
@@ -199,7 +227,6 @@ class _TopRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final caption = _caption();
     final letter = _initial(controller.email);
     return SizedBox(
       height: 56,
@@ -208,19 +235,26 @@ class _TopRow extends StatelessWidget {
         child: Row(
           children: [
             Expanded(
-              child: caption == null
-                  ? const SizedBox.shrink()
-                  : Tooltip(
-                      message: caption.text,
-                      child: Text(
-                        caption.text,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: FoxyText.caption.copyWith(
-                          color: caption.problem ? FoxyColors.danger : FoxyColors.textDim,
-                        ),
-                      ),
-                    ),
+              // The quota counts down live while connected (the stats tick).
+              child: ListenableBuilder(
+                listenable: controller.stats,
+                builder: (context, _) {
+                  final caption = _caption();
+                  return caption == null
+                      ? const SizedBox.shrink()
+                      : Tooltip(
+                          message: caption.text,
+                          child: Text(
+                            caption.text,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: FoxyText.caption.copyWith(
+                              color: caption.problem ? FoxyColors.danger : FoxyColors.textDim,
+                            ),
+                          ),
+                        );
+                },
+              ),
             ),
             const SizedBox(width: 8),
             // The slot is always reserved, so the icon appearing moves nothing.
@@ -280,16 +314,18 @@ class _ConflictButton extends StatelessWidget {
   }
 }
 
-String _initial(String? email) {
+/// The email's first letter; null when the address isn't known (the avatar
+/// then shows a person glyph).
+String? _initial(String? email) {
   final e = email?.trim() ?? '';
-  if (e.isEmpty) return '?';
+  if (e.isEmpty) return null;
   return String.fromCharCode(e.runes.first).toUpperCase();
 }
 
 class _Avatar extends StatelessWidget {
   const _Avatar({required this.letter, required this.onTap});
 
-  final String letter;
+  final String? letter;
   final VoidCallback onTap;
 
   @override
@@ -315,7 +351,9 @@ class _Avatar extends StatelessWidget {
                 width: s.focused ? 1.5 : 1,
               ),
             ),
-            child: Text(letter, style: FoxyText.label.copyWith(fontWeight: FontWeight.w600, fontSize: 13, height: 1)),
+            child: letter == null
+                ? FoxyIcon(FoxyIcons.user, size: 18, color: s.hovered ? FoxyColors.text : FoxyColors.textDim)
+                : Text(letter!, style: FoxyText.label.copyWith(fontWeight: FontWeight.w600, fontSize: 13, height: 1)),
           ),
         ),
       ),
@@ -406,8 +444,9 @@ String formatSessionTime(Duration d) {
   return '${two(d.inHours)}:${two(d.inMinutes.remainder(60))}:${two(d.inSeconds.remainder(60))}';
 }
 
-/// The big timer: ticks once a second since [since]; `00:00:00` in a dim tone
-/// when there is no session. It ignores the text scale (it is already large).
+/// The big timer: ticks once a second since [since], each changed digit
+/// rolling in like an odometer; `00:00:00` in a dim tone when there is no
+/// session. It ignores the text scale (it is already large).
 class SessionTimer extends StatefulWidget {
   const SessionTimer({super.key, this.since, this.now});
 
@@ -437,13 +476,26 @@ class _SessionTimerState extends State<SessionTimer> {
 
   void _sync() {
     if (widget.since != null && _timer == null) {
-      _timer = Timer.periodic(const Duration(seconds: 1), (_) {
-        if (mounted) setState(() {});
-      });
+      _schedule();
     } else if (widget.since == null) {
       _timer?.cancel();
       _timer = null;
     }
+  }
+
+  /// Ticks just after each whole second of the session, so no second is ever
+  /// skipped or shown twice (a free-running 1 s timer drifts against it).
+  void _schedule() {
+    final since = widget.since;
+    if (since == null) return;
+    final ms = (widget.now ?? DateTime.now)().difference(since).inMilliseconds;
+    final wait = 1000 - (ms < 0 ? 0 : ms % 1000) + 8;
+    _timer = Timer(Duration(milliseconds: wait), () {
+      _timer = null;
+      if (!mounted) return;
+      setState(() {});
+      _schedule();
+    });
   }
 
   @override
@@ -459,13 +511,15 @@ class _SessionTimerState extends State<SessionTimer> {
     final text = formatSessionTime(elapsed);
     return Align(
       alignment: Alignment.center,
-      child: FittedBox(
-        fit: BoxFit.scaleDown,
-        child: TabularText(
-          text,
-          textScaler: TextScaler.noScaling,
-          semanticLabel: since == null ? 'No active session' : 'Connected for $text',
-          style: FoxyText.timer.copyWith(color: since == null ? FoxyColors.textFaint : FoxyColors.text),
+      child: RepaintBoundary(
+        child: FittedBox(
+          fit: BoxFit.scaleDown,
+          child: OdometerText(
+            text,
+            textScaler: TextScaler.noScaling,
+            semanticLabel: since == null ? 'No active session' : 'Connected for $text',
+            style: FoxyText.timer.copyWith(color: since == null ? FoxyColors.textFaint : FoxyColors.text),
+          ),
         ),
       ),
     );
@@ -504,28 +558,34 @@ class _Panel extends StatelessWidget {
           children: [
             _LocationRow(controller: c, onTap: onChange),
             const SizedBox(height: 10),
-            Row(
-              children: [
-                Expanded(
-                  child: _SpeedTile(
-                    icon: FoxyIcons.arrowUp,
-                    label: 'Upload',
-                    live: live,
-                    bytesPerSec: c.upBytesPerSec,
-                    total: c.bytesUp,
-                  ),
+            // The once-a-second stats only rebuild (and repaint) these two tiles.
+            RepaintBoundary(
+              child: ListenableBuilder(
+                listenable: c.stats,
+                builder: (context, _) => Row(
+                  children: [
+                    Expanded(
+                      child: _SpeedTile(
+                        icon: FoxyIcons.arrowUp,
+                        label: 'Upload',
+                        live: live,
+                        bytesPerSec: c.upBytesPerSec,
+                        total: c.bytesUp,
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: _SpeedTile(
+                        icon: FoxyIcons.arrowDown,
+                        label: 'Download',
+                        live: live,
+                        bytesPerSec: c.downBytesPerSec,
+                        total: c.bytesDown,
+                      ),
+                    ),
+                  ],
                 ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: _SpeedTile(
-                    icon: FoxyIcons.arrowDown,
-                    label: 'Download',
-                    live: live,
-                    bytesPerSec: c.downBytesPerSec,
-                    total: c.bytesDown,
-                  ),
-                ),
-              ],
+              ),
             ),
           ],
         ),
@@ -547,7 +607,10 @@ class _LocationRow extends StatelessWidget {
     final connected = c.state == ConnState.connected;
     final title = l == null ? 'Choose a location' : (l.isRecommended ? 'Recommended' : l.countryName);
     final exitIp = connected ? c.exitIp : null;
-    final city = (l == null || l.isRecommended || l.cityName.isEmpty || l.cityName == l.countryName)
+    final fastest = l != null && l.isRecommended ? c.fastestLocation : null;
+    final city = fastest != null
+        ? 'Fastest · ${fastest.countryName}'
+        : (l == null || l.isRecommended || l.cityName.isEmpty || l.cityName == l.countryName)
         ? null
         : l.cityName;
     final subtitle = exitIp ?? city;

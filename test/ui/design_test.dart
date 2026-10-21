@@ -9,6 +9,7 @@ import 'package:foxyvpn/ui/screens/home_screen.dart';
 import 'package:foxyvpn/ui/theme.dart';
 import 'package:foxyvpn/ui/widgets/country_badge.dart';
 import 'package:foxyvpn/ui/widgets/foxy_icon.dart';
+import 'package:foxyvpn/ui/widgets/odometer_text.dart';
 import 'package:foxyvpn/ui/widgets/signal_bars.dart';
 import 'package:foxyvpn/ui/widgets/status_pill.dart';
 import 'package:foxyvpn/ui/widgets/tabular_text.dart';
@@ -141,7 +142,9 @@ void main() {
       );
       await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 100)));
       await tester.pump();
-      expect(find.byKey(const Key('svgFlag')), findsOneWidget);
+      // Drawn from the raster cache: a FlagImage (a RawImage once it is loaded), no letters.
+      expect(find.byType(FlagImage), findsOneWidget);
+      expect(find.descendant(of: find.byType(FlagImage), matching: find.byType(RawImage)), findsOneWidget);
       expect(find.text('DE'), findsNothing);
       expect(tester.getSize(find.byType(FlagBadge)), const Size(32, 32));
       final ring = tester.widget<DecoratedBox>(
@@ -193,7 +196,7 @@ void main() {
       );
       expect(find.text('ZZ'), findsOneWidget);
       expect(find.text('REC'), findsNothing);
-      expect(find.byKey(const Key('svgFlag')), findsNothing);
+      expect(find.byType(FlagImage), findsNothing);
     });
   });
 
@@ -251,7 +254,7 @@ void main() {
       final c = FakeVpnController();
       await pumpApp(tester, c);
       expect(find.tabular('00:00:00'), findsOneWidget);
-      final timer = tester.widget<TabularText>(find.tabular('00:00:00'));
+      final timer = tester.widget<OdometerText>(find.tabular('00:00:00'));
       expect(timer.style.color, FoxyColors.textFaint);
       expect(timer.style.fontSize, 46);
       expect(timer.style.fontWeight, FontWeight.w700);
@@ -268,7 +271,7 @@ void main() {
       // Live timer in full text colour.
       expect(
         tester
-            .widget<TabularText>(find.byWidgetPredicate((w) => w is TabularText && w.style.fontSize == 46))
+            .widget<OdometerText>(find.byWidgetPredicate((w) => w is OdometerText && w.style.fontSize == 46))
             .style
             .color,
         FoxyColors.text,
@@ -377,7 +380,7 @@ void main() {
       await tester.pump();
     }
 
-    testWidgets('two columns of 12 px-spaced cards inside the 24 px padding; Recommended spans the width', (
+    testWidgets('two columns of 10 px-spaced cards inside the 24 px padding; Recommended spans the width', (
       tester,
     ) async {
       await openGrid(tester, withPings());
@@ -390,12 +393,12 @@ void main() {
         find.ancestor(of: find.text('Austria'), matching: find.byType(AnimatedContainer)).first,
       );
       final berlin = tester.getRect(
-        find.ancestor(of: find.text('Frankfurt'), matching: find.byType(AnimatedContainer)).first,
+        find.ancestor(of: find.textContaining('Frankfurt'), matching: find.byType(AnimatedContainer)).first,
       );
       expect(austria.left, 24);
       expect(berlin.right, 376);
-      expect(berlin.left - austria.right, 12);
-      expect(austria.width, 170);
+      expect(berlin.left - austria.right, 10);
+      expect(austria.width, 171);
       expect(austria.top, berlin.top);
     });
 
@@ -404,7 +407,7 @@ void main() {
       BoxDecoration deco(String city) =>
           tester
                   .widget<AnimatedContainer>(
-                    find.ancestor(of: find.text(city), matching: find.byType(AnimatedContainer)).first,
+                    find.ancestor(of: find.textContaining(city), matching: find.byType(AnimatedContainer)).first,
                   )
                   .decoration!
               as BoxDecoration;
@@ -418,7 +421,7 @@ void main() {
       expect(
         find.byWidgetPredicate((w) => w is FoxyIcon && w.icon == FoxyIcons.check),
         findsNothing,
-        reason: 'the selected state is the fill and border, not a tick',
+        reason: 'no tick',
       );
     });
 
@@ -438,12 +441,12 @@ void main() {
       expect(d.color, FoxyColors.surfaceHi);
       expect((d.border! as Border).top.color, FoxyColors.lineHi);
       // Selected + hovered stays visibly the selected one.
-      await g.moveTo(tester.getCenter(find.text('Frankfurt')));
+      await g.moveTo(tester.getCenter(find.textContaining('Frankfurt')));
       await tester.pump(const Duration(milliseconds: 300));
       final s =
           tester
                   .widget<AnimatedContainer>(
-                    find.ancestor(of: find.text('Frankfurt'), matching: find.byType(AnimatedContainer)).first,
+                    find.ancestor(of: find.textContaining('Frankfurt'), matching: find.byType(AnimatedContainer)).first,
                   )
                   .decoration!
               as BoxDecoration;
@@ -453,11 +456,11 @@ void main() {
 
     testWidgets('countries with several cities get one card per city, with the city as subtitle', (tester) async {
       await openGrid(tester, withPings());
-      expect(find.text('Berlin'), findsOneWidget);
-      expect(find.text('Frankfurt'), findsOneWidget);
-      expect(find.text('New York'), findsOneWidget);
-      expect(find.text('Los Angeles'), findsOneWidget);
-      expect(find.text('Vienna'), findsNothing, reason: 'a single-city country has no city line');
+      expect(find.textContaining('Berlin'), findsOneWidget);
+      expect(find.textContaining('Frankfurt'), findsOneWidget);
+      expect(find.textContaining('New York'), findsOneWidget);
+      expect(find.textContaining('Los Angeles'), findsOneWidget);
+      expect(find.textContaining('Vienna'), findsNothing, reason: 'a single-city country has no city line');
       expect(find.tabular('30 ms'), findsOneWidget, reason: 'the ping has its own place on every card');
     });
 

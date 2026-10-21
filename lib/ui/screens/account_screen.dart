@@ -32,6 +32,14 @@ class _AccountScreenState extends State<AccountScreen> {
 
   VpnController get controller => widget.controller;
 
+  late Listenable _changes = Listenable.merge([controller, controller.stats]);
+
+  @override
+  void didUpdateWidget(AccountScreen old) {
+    super.didUpdateWidget(old);
+    if (old.controller != widget.controller) _changes = Listenable.merge([controller, controller.stats]);
+  }
+
   void _openLicenses(BuildContext context) {
     unawaited(_push.push(context, (_) => const _LicensesPage()));
   }
@@ -54,7 +62,8 @@ class _AccountScreenState extends State<AccountScreen> {
       backgroundColor: FoxyColors.bg,
       body: PageScaffold(
         child: ListenableBuilder(
-          listenable: controller,
+          // The data left counts down live while connected (the stats tick).
+          listenable: _changes,
           builder: (context, _) {
             final state = controller.state;
             final idle = state == ConnState.idle || state == ConnState.preparing;
@@ -141,7 +150,7 @@ class _IdentityCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final address = (email == null || email!.trim().isEmpty) ? null : email!.trim();
-    final letter = address == null ? '?' : String.fromCharCode(address.runes.first).toUpperCase();
+    final letter = address == null ? null : String.fromCharCode(address.runes.first).toUpperCase();
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
       child: AppCard(
@@ -156,7 +165,9 @@ class _IdentityCard extends StatelessWidget {
                 color: FoxyColors.surfaceHi,
                 border: Border.all(color: FoxyColors.line),
               ),
-              child: Text(letter, style: FoxyText.title.copyWith(height: 1)),
+              child: letter == null
+                  ? const FoxyIcon(FoxyIcons.user, size: 22, color: FoxyColors.textDim)
+                  : Text(letter, style: FoxyText.title.copyWith(height: 1)),
             ),
             const SizedBox(width: 16),
             Expanded(

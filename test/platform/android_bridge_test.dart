@@ -127,9 +127,9 @@ void main() {
     });
 
     test('start passes the SOCKS port and label; the app stays out of the VPN (nothing to bind)', () async {
-      final tun = await AndroidTun.start(socksPort: 4321, label: 'Protected · Austria', bridge: bridge);
+      final tun = await AndroidTun.start(socksPort: 4321, label: 'Austria', bridge: bridge);
       expect(service.lastSocksPort, 4321);
-      expect(service.lastLabel, 'Protected · Austria');
+      expect(service.lastLabel, 'Austria');
       expect(tun.physicalAddress, isNull);
       await tun.refreshBypass(); // a no-op
       await tun.stop();

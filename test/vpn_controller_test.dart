@@ -309,6 +309,41 @@ void main() {
     expect(c.error, contains('Could not reach any server in DE, ber'), reason: 'only the second attempt reports');
   });
 
+  test('while a round of pings runs the order holds still, then moves once', () async {
+    var round = 0;
+    final waits = <String, Completer<int?>>{};
+    final c = VpnController(
+      account: account,
+      settings: settings,
+      cleanup: () async {},
+      loadLocations: () async => [tokyo, berlin, rec, paris],
+      ping: (node) => round == 0 ? Future.value(pings[node.host]) : (waits[node.host] = Completer<int?>()).future,
+      detectConflicts: () async => const [],
+    );
+    await c.init();
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    expect(c.locations, [rec, paris, berlin, tokyo]);
+    expect(c.pingingLocations, isFalse);
+
+    round = 1;
+    await c.refreshLocations(); // the list is in; its pings now wait
+    expect(c.pingingLocations, isTrue);
+    expect(c.locations, [rec, paris, berlin, tokyo], reason: 'the previous order while measuring');
+
+    waits['tyo.example.com']!.complete(5); // Tokyo answers first, and fastest
+    await Future<void>.delayed(Duration.zero);
+    expect(c.pingOf(tokyo), 5);
+    expect(c.locations, [rec, paris, berlin, tokyo], reason: 'no jump mid-round');
+
+    for (final host in ['ber.example.com', 'par.example.com', 'rec.example.com']) {
+      waits[host]!.complete(pings[host]);
+    }
+    await Future<void>.delayed(Duration.zero);
+    expect(c.pingingLocations, isFalse);
+    expect(c.locations, [rec, tokyo, paris, berlin], reason: 'one reorder when every reply is in');
+    c.dispose();
+  });
+
   test('locations failing to load show an error and can be retried', () async {
     var fail = true;
     final c = make(load: () async {

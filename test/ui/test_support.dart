@@ -8,6 +8,7 @@ import 'package:foxyvpn/fxa.dart';
 import 'package:foxyvpn/platform/host.dart';
 import 'package:foxyvpn/servers.dart';
 import 'package:foxyvpn/ui/app.dart';
+import 'package:foxyvpn/ui/widgets/odometer_text.dart';
 import 'package:foxyvpn/ui/widgets/tabular_text.dart';
 import 'package:foxyvpn/vpn_controller.dart';
 
@@ -26,8 +27,10 @@ Future<bool> loadTestFonts() async {
 }
 
 extension TabularFinders on CommonFinders {
-  /// A [TabularText] showing exactly [text] (its digits are separate widgets).
-  Finder tabular(String text) => byWidgetPredicate((w) => w is TabularText && w.text == text);
+  /// A [TabularText] or [OdometerText] (the session timer) showing exactly
+  /// [text] (its digits are separate widgets).
+  Finder tabular(String text) =>
+      byWidgetPredicate((w) => (w is TabularText && w.text == text) || (w is OdometerText && w.text == text));
 }
 
 Location loc(String code, String country, [String city = '', String cityCode = '']) => Location(
@@ -175,14 +178,45 @@ class FakeVpnController extends ChangeNotifier implements VpnController {
   @override
   String? get accountError => _accountError;
 
+  /// Like the real controller: Recommended first, then by ping (no reply
+  /// last), ties in list order.
   @override
-  List<Location> get locations => _locations;
+  List<Location> get locations {
+    int key(Location l) => l.isRecommended ? -1 : (_pings[l] ?? 1 << 30);
+    final indexed = [for (var i = 0; i < _locations.length; i++) (i, _locations[i])];
+    indexed.sort((a, b) {
+      final byPing = key(a.$2).compareTo(key(b.$2));
+      return byPing != 0 ? byPing : a.$1.compareTo(b.$1);
+    });
+    return [for (final e in indexed) e.$2];
+  }
+
+  @override
+  bool get pingingLocations => _pinging.isNotEmpty;
 
   @override
   int? pingOf(Location l) => _pings[l];
 
   @override
   bool isPinging(Location l) => _pinging.contains(l);
+
+  @override
+  Location? get fastestLocation {
+    Location? best;
+    for (final l in _locations) {
+      final ms = _pings[l];
+      if (l.isRecommended || ms == null) continue;
+      if (best == null || ms < _pings[best]!) best = l;
+    }
+    return best;
+  }
+
+  /// The fake's stats changes notify like everything else (via [update]).
+  @override
+  Listenable get stats => this;
+
+  @override
+  void setVisible(bool visible) {}
 
   @override
   bool get loadingLocations => _loading;

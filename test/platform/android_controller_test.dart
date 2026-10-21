@@ -144,14 +144,16 @@ void main() {
   final berlin = loc('DE', 'Germany', 'ber');
   VpnController? controller;
 
-  VpnController make({bool signedIn = true, bool withBridge = true}) {
+  // [pingsAnswer] false: no real location answers the ping, so Recommended falls back
+  // to Mozilla's REC location (otherwise it connects to the fastest real one).
+  VpnController make({bool signedIn = true, bool withBridge = true, bool pingsAnswer = true}) {
     account = _Account(signedIn: signedIn);
     return controller = VpnController(
       account: account,
       settings: settings,
       cleanup: () async {},
       loadLocations: () async => [rec, vienna, berlin],
-      ping: (node) async => 20,
+      ping: (node) async => pingsAnswer ? 20 : null,
       detectConflicts: () async => const [],
       startSession:
           ({
@@ -213,11 +215,11 @@ void main() {
   });
 
   test('connect: permission first, then the session, then the tunnel with the status text', () async {
-    final c = make();
+    final c = make(pingsAnswer: false);
     await c.init();
     await c.connect();
 
-    expect(events, ['prepare', 'session start rec', 'tun start 4321 Protected']);
+    expect(events, ['prepare', 'session start rec', 'tun start 4321 Connected']);
     expect(c.state, ConnState.connected);
     expect(directFallbackSeen, isFalse, reason: 'there is no direct path on Android, whatever the stored setting says');
     expect(ControlPlane.sourceAddress, isNull, reason: 'the app is outside the VPN; nothing to bind');
@@ -228,7 +230,7 @@ void main() {
     await c.init();
     await c.select(vienna);
     await c.connect();
-    expect(events.last, 'tun start 4321 Protected · Austria');
+    expect(events.last, 'tun start 4321 Austria');
 
     await pumpEventQueue();
     session.setPhase(VpnPhase.reconnecting);
@@ -236,17 +238,24 @@ void main() {
     expect(tun.statuses.last, 'Reconnecting…');
     session.setPhase(VpnPhase.connected);
     await pumpEventQueue();
-    expect(tun.statuses.last, 'Protected · Austria');
+    expect(tun.statuses.last, 'Austria');
   });
 
-  test('Recommended shows the real exit country once the exit check knows it', () async {
+  test('Recommended connects to the fastest real location when one answered', () async {
     final c = make();
     await c.init();
     await c.connect();
-    expect(events.last, 'tun start 4321 Protected');
+    expect(events, ['prepare', 'session start vie', 'tun start 4321 Austria']);
+  });
+
+  test('Recommended shows the real exit country once the exit check knows it', () async {
+    final c = make(pingsAnswer: false); // no real location answered: Mozilla's REC fallback
+    await c.init();
+    await c.connect();
+    expect(events.last, 'tun start 4321 Connected');
     await Future<void>.delayed(const Duration(milliseconds: 60)); // the exit check (loc=AT)
     expect(c.exitCountryCode, 'AT');
-    expect(tun.statuses.last, 'Protected · Austria');
+    expect(tun.statuses.last, 'Austria');
   });
 
   test('a refused VPN permission is an error, and no session or quota is used', () async {
@@ -294,11 +303,11 @@ void main() {
 
   test('Always-on VPN: Android started the service, so the app connects by itself', () async {
     service.autoStartPending = true;
-    final c = make();
+    final c = make(pingsAnswer: false);
     await c.init();
     await Future<void>.delayed(const Duration(milliseconds: 30));
     expect(c.state, ConnState.connected);
-    expect(events, ['prepare', 'session start rec', 'tun start 4321 Protected']);
+    expect(events, ['prepare', 'session start rec', 'tun start 4321 Connected']);
   });
 
   test('Always-on VPN while the app is running: the event connects too', () async {
@@ -364,7 +373,7 @@ void main() {
     expect(c.state, ConnState.connected);
     expect(service.calls, containsAllInOrder(['prepare', 'requestNotifications', 'start']));
     expect(service.lastSocksPort, 4321);
-    expect(service.lastLabel, 'Protected · Austria');
+    expect(service.lastLabel, 'Austria');
 
     await c.disconnect();
     expect(service.calls.last, 'stop');

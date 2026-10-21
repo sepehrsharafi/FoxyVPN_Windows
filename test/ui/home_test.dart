@@ -4,7 +4,7 @@ import 'package:foxyvpn/ui/screens/home_screen.dart';
 import 'package:foxyvpn/ui/widgets/country_badge.dart';
 import 'package:foxyvpn/ui/widgets/power_switch.dart';
 import 'package:foxyvpn/ui/widgets/status_pill.dart';
-import 'package:foxyvpn/ui/widgets/tabular_text.dart';
+import 'package:foxyvpn/ui/widgets/odometer_text.dart';
 import 'package:foxyvpn/vpn_controller.dart';
 
 import 'test_support.dart';
@@ -99,8 +99,12 @@ void main() {
     );
     expect(find.tabular('01:02:03'), findsOneWidget);
     now = now.add(const Duration(seconds: 1));
+    // It ticks just after the whole second (8 ms later), then the changed digit rolls for 460 ms.
     await tester.pump(const Duration(seconds: 1));
+    expect(find.tabular('01:02:03'), findsOneWidget, reason: 'not yet: the tick is on the whole second');
+    await tester.pump(const Duration(milliseconds: 20));
     expect(find.tabular('01:02:04'), findsOneWidget);
+    await tester.pump(const Duration(milliseconds: 500));
     expect(formatSessionTime(const Duration(hours: 123, minutes: 4, seconds: 5)), '123:04:05');
     expect(formatSessionTime(const Duration(seconds: -3)), '00:00:00');
   });
@@ -205,5 +209,5 @@ void main() {
 }
 
 extension on CommonFinders {
-  Finder tabularMatching(RegExp re) => find.byWidgetPredicate((w) => w is TabularText && re.hasMatch(w.text));
+  Finder tabularMatching(RegExp re) => find.byWidgetPredicate((w) => w is OdometerText && re.hasMatch(w.text));
 }

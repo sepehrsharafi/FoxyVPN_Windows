@@ -207,7 +207,7 @@ object Bridge {
 
     private fun start(context: Context, call: MethodCall, result: MethodChannel.Result) {
         val port = call.argument<Int>("socksPort") ?: return result.error("bad_args", "socksPort", null)
-        val label = call.argument<String>("label") ?: "Protected"
+        val label = call.argument<String>("label") ?: "Connected"
         if (VpnService.prepare(context) != null) {
             return result.error("not_prepared", "The VPN permission has not been granted.", null)
         }

@@ -142,7 +142,7 @@ class _Gate extends StatefulWidget {
   State<_Gate> createState() => _GateState();
 }
 
-class _GateState extends State<_Gate> {
+class _GateState extends State<_Gate> with WidgetsBindingObserver {
   bool _wasSignedIn = false;
 
   @override
@@ -150,6 +150,7 @@ class _GateState extends State<_Gate> {
     super.initState();
     _wasSignedIn = widget.controller.signedIn;
     widget.controller.addListener(_onChange);
+    WidgetsBinding.instance.addObserver(this);
   }
 
   @override
@@ -164,8 +165,15 @@ class _GateState extends State<_Gate> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     widget.controller.removeListener(_onChange);
     super.dispose();
+  }
+
+  // In the background nothing shows the live stats, so their timer rests.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    widget.controller.setVisible(state == AppLifecycleState.resumed || state == AppLifecycleState.inactive);
   }
 
   void _onChange() {

@@ -4,7 +4,10 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.net.IpPrefix
 import android.net.VpnService
@@ -12,13 +15,17 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.ParcelFileDescriptor
+import android.os.PowerManager
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import com.foxyvpn.app.Bridge
 import com.foxyvpn.app.FoxyEngine
 import com.foxyvpn.app.MainActivity
 import com.foxyvpn.app.R
 import java.net.InetAddress
+import java.util.Locale
 import java.util.concurrent.Executors
 
 /**
@@ -44,7 +51,7 @@ class FoxyVpnService : VpnService() {
 
     private var tun: ParcelFileDescriptor? = null
     private var hevRunning = false
-    private var label = "Protected"
+    private var label = "Connected"
     private var generation = 0
     private var foregroundActive = false
     private var autoStartTimeout: Runnable? = null
@@ -55,9 +62,16 @@ class FoxyVpnService : VpnService() {
         super.onCreate()
         instance = this
         createChannel()
+        val screen = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_SCREEN_OFF)
+        }
+        ContextCompat.registerReceiver(this, screenReceiver, screen, ContextCompat.RECEIVER_NOT_EXPORTED)
     }
 
     override fun onDestroy() {
+        stopTicker()
+        runCatching { unregisterReceiver(screenReceiver) }
         cancelTimeouts()
         // The process may be going away: never leave the interface or hev behind.
         // (Normal stops go through finishTunnel(), which clears the flag itself;
@@ -98,7 +112,7 @@ class FoxyVpnService : VpnService() {
     private fun startTunnel(socksPort: Int, newLabel: String) {
         // Must come first: the service was started with startForegroundService().
         label = newLabel
-        enterForeground(label)
+        enterForeground(null)
         cancelTimeouts()
         if (socksPort <= 0) {
             failStart("The local proxy port is missing.")
@@ -126,6 +140,14 @@ class FoxyVpnService : VpnService() {
                 throw IllegalStateException("The native tunnel could not be started.")
             }
             hevRunning = true
+            if (previousHev) {
+                lastUp = 0 // the new hev counts from zero; the totals carry on
+                lastDown = 0
+            } else {
+                resetTraffic()
+            }
+            refreshNotification()
+            syncTicker()
             generation++
             closeQuietly(previousTun)
             Log.i(TAG, "tunnel up (generation $generation, socks 127.0.0.1:$socksPort)")
@@ -239,7 +261,7 @@ class FoxyVpnService : VpnService() {
     private fun onSystemStart() {
         if (hevRunning) return
         Log.i(TAG, "started by the system (Always-on VPN)")
-        enterForeground(getString(R.string.notification_connecting))
+        enterForeground(null)
         FoxyEngine.ensure(applicationContext) // Dart must be running even without an Activity
         markStarting()
         Bridge.requestAutoStart()
@@ -272,7 +294,7 @@ class FoxyVpnService : VpnService() {
      * ping, pick and connect. Dart ends the service again if nothing comes of it.
      */
     private fun onQuickConnect() {
-        enterForeground(if (hevRunning) label else getString(R.string.notification_connecting))
+        enterForeground(if (hevRunning) label else null)
         if (hevRunning) return // already up (a second tap racing the first): nothing to do
         Log.i(TAG, "quick connect from the tile")
         FoxyEngine.ensure(applicationContext)
@@ -381,12 +403,17 @@ class FoxyVpnService : VpnService() {
     // Notification (foreground service)
     // ---------------------------------------------------------------------------
 
+    /** The location ("Austria"), or "Reconnecting…"; set by Dart. */
     fun setLabel(newLabel: String) {
         if (newLabel.isEmpty() || newLabel == label) return
         label = newLabel
+        refreshNotification()
+    }
+
+    private fun refreshNotification() {
         if (!foregroundActive) return
         getSystemService(NotificationManager::class.java)
-            ?.let { runCatching { it.notify(NOTIFICATION_ID, buildNotification(label)) } }
+            ?.let { runCatching { it.notify(NOTIFICATION_ID, buildNotification(if (hevRunning) label else null)) } }
     }
 
     private fun createChannel() {
@@ -402,7 +429,8 @@ class FoxyVpnService : VpnService() {
         manager.createNotificationChannel(channel)
     }
 
-    private fun buildNotification(text: String): Notification {
+    // Built once; each refresh only swaps the two lines of text.
+    private val notificationBuilder: NotificationCompat.Builder by lazy {
         val open = PendingIntent.getActivity(
             this,
             REQUEST_OPEN,
@@ -415,33 +443,55 @@ class FoxyVpnService : VpnService() {
             Intent(this, FoxyVpnService::class.java).setAction(ACTION_DISCONNECT),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
-        return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle(getString(R.string.app_name))
-            .setContentText(text)
+        NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_foxy)
             .setContentIntent(open)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
+            .setSilent(true)
             .setShowWhen(false)
             .setLocalOnly(true)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .addAction(0, getString(R.string.notification_disconnect), disconnect)
-            .build()
     }
 
-    private fun enterForeground(text: String) {
-        val notification = buildNotification(text)
+    /**
+     * Collapsed, it already says everything (Android shows "FoxyVPN" in the
+     * header, so the app name is not repeated):
+     *
+     *     Austria
+     *     ↓ 1.2 MB/s   ↑ 84 KB/s   ·   312 MB
+     *
+     * [location] null = still connecting: just "Connecting…".
+     */
+    private fun buildNotification(location: String?): Notification {
+        val b = notificationBuilder
+        if (location == null) {
+            b.setContentTitle(getString(R.string.notification_connecting)).setContentText(null)
+        } else {
+            b.setContentTitle(location).setContentText(
+                "↓ ${formatBytes(downRate.toLong())}/s   ↑ ${formatBytes(upRate.toLong())}/s   ·   " +
+                    formatBytes(upTotal + downTotal),
+            )
+        }
+        return b.build()
+    }
+
+    private fun enterForeground(location: String?) {
+        val notification = buildNotification(location)
         if (Build.VERSION.SDK_INT >= 34) {
             startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
         foregroundActive = true
+        syncTicker()
     }
 
     private fun leaveForeground() {
+        stopTicker()
         if (!foregroundActive) return
         foregroundActive = false
         try {
@@ -449,6 +499,99 @@ class FoxyVpnService : VpnService() {
         } catch (_: Throwable) {
         }
     }
+
+    // ---------------------------------------------------------------------------
+    // Live traffic, read from hev's own counters once a second. Only while the
+    // screen is on: nobody can see the notification otherwise, and the phone
+    // stays asleep.
+    // ---------------------------------------------------------------------------
+
+    private var upTotal = 0L
+    private var downTotal = 0L
+    private var lastUp = 0L
+    private var lastDown = 0L
+    private var upRate = 0.0
+    private var downRate = 0.0
+    private var lastSampleAt = 0L // 0 = the next sample only sets the baseline for the rates
+    private var ticking = false
+
+    private val ticker = object : Runnable {
+        override fun run() {
+            sampleTraffic()
+            refreshNotification()
+            main.postDelayed(this, 1000)
+        }
+    }
+
+    private val screenReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) = syncTicker()
+    }
+
+    /** A new connection (not a reconnect inside one) starts the counts from zero. */
+    private fun resetTraffic() {
+        upTotal = 0
+        downTotal = 0
+        lastUp = 0
+        lastDown = 0
+        upRate = 0.0
+        downRate = 0.0
+        lastSampleAt = 0
+    }
+
+    private fun sampleTraffic() {
+        if (!hevRunning) return
+        // tx = read from the interface (upload), rx = written to it (download).
+        // hev starts from zero after a restart (reconnect), hence the "else".
+        val s = HevSocks5Tunnel.stats()
+        val up = s.getOrElse(1) { 0L }
+        val down = s.getOrElse(3) { 0L }
+        val dUp = if (up >= lastUp) up - lastUp else up
+        val dDown = if (down >= lastDown) down - lastDown else down
+        lastUp = up
+        lastDown = down
+        upTotal += dUp
+        downTotal += dDown
+        val now = SystemClock.elapsedRealtime()
+        if (lastSampleAt != 0L) {
+            val seconds = ((now - lastSampleAt).coerceAtLeast(1)) / 1000.0
+            upRate = 0.5 * upRate + 0.5 * (dUp / seconds)
+            downRate = 0.5 * downRate + 0.5 * (dDown / seconds)
+        }
+        lastSampleAt = now
+    }
+
+    private fun syncTicker() {
+        val interactive = getSystemService(PowerManager::class.java)?.isInteractive ?: true
+        if (foregroundActive && hevRunning && interactive) {
+            if (ticking) return
+            ticking = true
+            // Bytes moved while the screen was off still count; the speed starts fresh.
+            sampleTraffic()
+            upRate = 0.0
+            downRate = 0.0
+            main.post(ticker)
+        } else {
+            stopTicker()
+            lastSampleAt = 0
+        }
+    }
+
+    private fun stopTicker() {
+        ticking = false
+        main.removeCallbacks(ticker)
+    }
+
+    private fun formatBytes(bytes: Long): String {
+        val units = arrayOf("B", "KB", "MB", "GB", "TB")
+        var value = bytes.coerceAtLeast(0).toDouble()
+        var unit = 0
+        while (value >= 1024 && unit < units.size - 1) {
+            value /= 1024
+            unit++
+        }
+        return if (unit == 0) "${value.toLong()} ${units[unit]}" else String.format(Locale.US, "%.1f %s", value, units[unit])
+    }
+
 
     companion object {
         private const val TAG = "FoxyVpnService"

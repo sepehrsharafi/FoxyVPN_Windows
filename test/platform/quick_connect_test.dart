@@ -537,7 +537,7 @@ void main() {
       await quick;
       await pumpEventQueue();
       expect(phases(), containsAllInOrder(['connecting', 'connected']));
-      expect(service.tileStates.last, {'signedIn': true, 'phase': 'connected', 'label': 'Protected · Germany'});
+      expect(service.tileStates.last, {'signedIn': true, 'phase': 'connected', 'label': 'Germany'});
     });
 
     test('disconnect brings it back to off', () async {

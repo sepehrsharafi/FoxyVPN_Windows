@@ -99,7 +99,7 @@ the driver is already there. Many VPNs and WireGuard use the same driver. So:
 
 The Android app has a **FoxyVPN** tile for the quick settings panel. Tap it while the VPN is off to
 connect to the fastest location (every location is pinged first, the lowest ping wins); tap it while it
-is on or connecting to disconnect. While connected it shows "Protected · Austria" (or the country you are
+is on or connecting to disconnect. While connected it shows the country, e.g. "Austria" (or the country you are
 in). Signed out, it reads "Sign in first".
 
 Adding it on a Xiaomi phone (HyperOS / MIUI): pull down the **Control Center** (swipe down from the top

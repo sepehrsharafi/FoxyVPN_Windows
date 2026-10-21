@@ -13,6 +13,7 @@ dependencies:
   flutter:
     sdk: flutter
   http2: ^3.1.0
+  jovial_svg: ^1.1.31 # country_flags' renderer; used directly to rasterise each flag once
   window_manager: ^0.5.2
 
 dev_dependencies:

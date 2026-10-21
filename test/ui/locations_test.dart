@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:foxyvpn/ui/theme.dart';
+import 'package:foxyvpn/ui/widgets/country_badge.dart';
 import 'package:foxyvpn/ui/widgets/foxy_icon.dart';
 import 'package:foxyvpn/ui/widgets/signal_bars.dart';
 import 'package:foxyvpn/ui/widgets/tabular_text.dart';
@@ -35,7 +36,7 @@ void main() {
     return c;
   }
 
-  testWidgets('Recommended first, then by ping, no reply last; selected row has a check', (tester) async {
+  testWidgets('Recommended first, then by ping, no reply last; no tick on the selected row', (tester) async {
     final c = await open(tester, controller: withPings());
 
     final names = [
@@ -51,10 +52,18 @@ void main() {
     expect(austria, lessThan(germany));
     expect(germany, lessThan(bosnia));
     expect(names.indexOf('Japan'), greaterThan(names.indexOf('United States')), reason: 'no reply sorts last');
-    // City is shown only for countries with several cities.
-    expect(find.descendant(of: find.byType(CustomScrollView), matching: find.text('Frankfurt')), findsOneWidget);
-    expect(find.descendant(of: find.byType(CustomScrollView), matching: find.text('Vienna')), findsNothing);
+    // City is shown only for countries with several cities (after the ping: "60 ms · Frankfurt").
+    expect(find.descendant(of: find.byType(CustomScrollView), matching: find.textContaining('Frankfurt')), findsOneWidget);
+    expect(find.descendant(of: find.byType(CustomScrollView), matching: find.textContaining('Vienna')), findsNothing);
     expect(find.tabular('30 ms'), findsOneWidget);
+    // No tick: the selected card is told apart by its fill and border.
+    expect(
+      find.descendant(
+        of: find.byType(CustomScrollView),
+        matching: find.byWidgetPredicate((w) => w is FoxyIcon && w.icon == FoxyIcons.check),
+      ),
+      findsNothing,
+    );
     expect(tester.takeException(), isNull);
     expect(c.calls, isEmpty);
   });
@@ -62,7 +71,9 @@ void main() {
   group('ping on every card', () {
     Finder inGrid(Finder f) => find.descendant(of: find.byType(CustomScrollView), matching: f);
 
-    testWidgets('every card shows bars and "NN ms" top-right, Recommended and the selected one included', (tester) async {
+    testWidgets('every card shows "NN ms" under the name, Recommended and the selected one included', (
+      tester,
+    ) async {
       final c = withPings();
       final l = c.locations;
       c.setPing(l[0], 29); // Recommended
@@ -72,23 +83,56 @@ void main() {
       for (final ms in [29, 180, 60, 30, 240, 330, 95]) {
         expect(inGrid(find.tabular('$ms ms')), findsOneWidget, reason: '$ms ms');
       }
-      // One readout per card (9 locations, Home's row is underneath the page).
-      expect(inGrid(find.byType(PingReadout)), findsNWidgets(9));
+      // No signal bars any more; the two locations without a reply say so.
+      expect(inGrid(find.byType(PingReadout)), findsNothing);
+      expect(inGrid(find.text('No reply')), findsNWidgets(2));
 
-      // Top-right: the readout sits at the right edge of its card, above the name.
-      final cardRect = tester.getRect(
-        find.ancestor(of: inGrid(find.text('Austria')), matching: find.byType(AnimatedContainer)).first,
+      // The ping sits on the second line, under the name and to the right of the flag.
+      final austria = tester.getRect(inGrid(find.text('Austria')));
+      final ping = tester.getRect(inGrid(find.tabular('30 ms')));
+      expect(ping.top, greaterThanOrEqualTo(austria.bottom - 1));
+      expect(ping.left, austria.left, reason: 'the ping lines up under the name');
+      final flag = tester.getRect(
+        find.descendant(
+          of: find.ancestor(of: inGrid(find.text('Austria')), matching: find.byType(AnimatedContainer)).first,
+          matching: find.byType(FlagBadge),
+        ),
       );
-      final readout = tester.getRect(find.ancestor(of: inGrid(find.tabular('30 ms')), matching: find.byType(PingReadout)));
-      expect(readout.right, closeTo(cardRect.right - 13, 0.5));
-      expect(readout.top, lessThan(cardRect.top + 24));
-      expect(readout.bottom, lessThan(tester.getRect(inGrid(find.text('Austria'))).top));
+      expect(flag.width, 30);
+      expect(flag.right, lessThanOrEqualTo(austria.left));
 
-      // The selected card has the same readout, no tick.
-      expect(find.byWidgetPredicate((w) => w is FoxyIcon && w.icon == FoxyIcons.check), findsNothing);
+      // The selected card has the same readout, and no tick.
+      expect(
+        inGrid(find.byWidgetPredicate((w) => w is FoxyIcon && w.icon == FoxyIcons.check)),
+        findsNothing,
+      );
     });
 
-    testWidgets('no reply is empty bars and "No reply", measuring is a spinner, and the ping style is 13 / 600 textDim', (
+    testWidgets('Recommended is the wide card: a 36 px flag and "Fastest · <country>" next to its ping', (tester) async {
+      final c = withPings();
+      c.setPing(c.locations[0], 30);
+      await open(tester, controller: c);
+      final card = find.ancestor(of: inGrid(find.text('Recommended')), matching: find.byType(AnimatedContainer)).first;
+      expect(tester.getSize(find.descendant(of: card, matching: find.byType(FlagBadge))).width, 36);
+      expect(find.descendant(of: card, matching: find.textContaining('Fastest · Austria')), findsOneWidget);
+      expect(find.descendant(of: card, matching: find.tabular('30 ms')), findsOneWidget);
+    });
+
+    testWidgets('Recommended says "Finding the fastest" while measuring and "Mozilla\'s pick" without a reply', (
+      tester,
+    ) async {
+      final c = FakeVpnController();
+      c.setPinging(c.locations[0], true); // Recommended: no location has answered yet
+      await open(tester, controller: c);
+      expect(inGrid(find.text('Finding the fastest')), findsOneWidget);
+      expect(inGrid(find.textContaining('Fastest ·')), findsNothing);
+
+      c.update((c) => c.setPinging(c.locations[0], false));
+      await tester.pump();
+      expect(inGrid(find.textContaining('Mozilla\'s pick')), findsOneWidget);
+    });
+
+    testWidgets('no reply is "No reply", measuring is a spinner, and the ping style is 13 / 600 textDim', (
       tester,
     ) async {
       final c = withPings();
@@ -118,16 +162,39 @@ void main() {
       await open(tester, controller: c);
       Rect card(String text) =>
           tester.getRect(find.ancestor(of: inGrid(find.text(text)), matching: find.byType(AnimatedContainer)).first);
-      final berlin = card('Berlin'); // has a city line
+      final berlin = card('Germany'); // has a city on its line
       final austria = card('Austria'); // none
       expect(berlin.height, austria.height);
       // Same row: the country names sit at the same y.
       expect(tester.getRect(inGrid(find.text('Germany')).first).top, tester.getRect(inGrid(find.text('Austria'))).top);
     });
 
-    testWidgets('selected card keeps the surfaceHi fill and a 1 px textDim border, with its ping', (tester) async {
+    testWidgets('a ping turning into a spinner (refresh) moves nothing on the card', (tester) async {
       final c = withPings();
-      c.selected = c.locations[3];
+      await open(tester, controller: c);
+      final austria = c.locations.firstWhere((l) => l.countryName == 'Austria');
+      // Where the name sits inside its own card (the fake re-sorts at once, moving the card).
+      Offset nameInCard() {
+        final name = inGrid(find.text('Austria'));
+        final card = find.ancestor(of: name, matching: find.byType(AnimatedContainer)).first;
+        return tester.getTopLeft(name) - tester.getTopLeft(card);
+      }
+
+      final before = nameInCard();
+      c.update((c) {
+        c.setPing(austria, null);
+        c.setPinging(austria, true);
+      });
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 70)); // mid crossfade
+      expect(nameInCard(), before);
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(nameInCard(), before);
+    });
+
+    testWidgets('selected card keeps the surfaceHi fill, a 1 px textDim border and its ping', (tester) async {
+      final c = withPings();
+      c.selected = c.locations.firstWhere((l) => l.countryName == 'Austria');
       await open(tester, controller: c);
       final deco =
           tester

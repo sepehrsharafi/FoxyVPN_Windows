@@ -2,29 +2,51 @@ import 'package:flutter/material.dart';
 
 import '../theme.dart';
 
-/// A page that slides in from the right (~220 ms, ease-out) while the page
-/// underneath drifts a little to the left.
-Route<T> foxyRoute<T>(WidgetBuilder builder, {RouteSettings? settings, bool instant = false}) {
-  final slideIn = Tween<Offset>(
-    begin: const Offset(1, 0),
-    end: Offset.zero,
-  ).chain(CurveTween(curve: Curves.easeOutCubic));
-  final slideAway = Tween<Offset>(
-    begin: Offset.zero,
-    end: const Offset(-0.18, 0),
-  ).chain(CurveTween(curve: Curves.easeOutCubic));
-  return PageRouteBuilder<T>(
-    settings: settings,
-    transitionDuration: instant ? Duration.zero : FoxySpace.page,
-    reverseTransitionDuration: FoxySpace.page,
-    opaque: true,
-    barrierColor: null,
-    pageBuilder: (context, _, _) => builder(context),
-    transitionsBuilder: (context, animation, secondary, child) => SlideTransition(
-      position: secondary.drive(slideAway),
-      child: SlideTransition(position: animation.drive(slideIn), child: child),
-    ),
-  );
+/// Pages open and close with Android's own zoom transition: the new page
+/// grows in from slightly smaller while fading in, as the old one grows a touch
+/// and fades away; closing plays it backwards. Both pages are snapshotted for
+/// the duration, so it is a couple of textured quads per frame even on
+/// low-end phones. The system back gesture simply plays the closing motion.
+Route<T> foxyRoute<T>(WidgetBuilder builder, {RouteSettings? settings, bool instant = false}) =>
+    _FoxyPageRoute<T>(builder: builder, settings: settings, instant: instant);
+
+const _zoom = ZoomPageTransitionsBuilder(backgroundColor: FoxyColors.bg);
+
+class _FoxyPageRoute<T> extends PageRoute<T> {
+  _FoxyPageRoute({required this.builder, super.settings, this.instant = false});
+
+  final WidgetBuilder builder;
+  final bool instant;
+
+  @override
+  Duration get transitionDuration => instant ? Duration.zero : _zoom.transitionDuration;
+
+  @override
+  Duration get reverseTransitionDuration => _zoom.reverseTransitionDuration;
+
+  @override
+  bool get opaque => true;
+
+  @override
+  bool get maintainState => true;
+
+  @override
+  Color? get barrierColor => null;
+
+  @override
+  String? get barrierLabel => null;
+
+  @override
+  Widget buildPage(BuildContext context, Animation<double> animation, Animation<double> secondaryAnimation) =>
+      builder(context);
+
+  @override
+  Widget buildTransitions(
+    BuildContext context,
+    Animation<double> animation,
+    Animation<double> secondaryAnimation,
+    Widget child,
+  ) => _zoom.buildTransitions(this, context, animation, secondaryAnimation, child);
 }
 
 /// Ignores a push while another one from the same screen is still open, so a

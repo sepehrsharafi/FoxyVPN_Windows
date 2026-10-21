@@ -21,6 +21,7 @@ enum FoxyIcons {
   info,
   signOut,
   alert,
+  user,
 }
 
 /// Thin line icons (round caps and joins) drawn on a 24-unit grid.
@@ -173,6 +174,13 @@ class _IconPainter extends CustomPainter {
           ..lineTo(16, 16.5)
           ..moveTo(20.5, 12)
           ..lineTo(9.5, 12);
+      case FoxyIcons.user:
+        // Head and shoulders.
+        p
+          ..addOval(Rect.fromCircle(center: const Offset(12, 8.5), radius: 3.75))
+          ..moveTo(4.75, 20)
+          ..cubicTo(5.6, 16.4, 8.4, 14.5, 12, 14.5)
+          ..cubicTo(15.6, 14.5, 18.4, 16.4, 19.25, 20);
       case FoxyIcons.alert:
         p
           ..moveTo(12, 4)

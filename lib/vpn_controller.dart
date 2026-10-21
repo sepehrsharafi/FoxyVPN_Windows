@@ -342,6 +342,8 @@ class VpnController extends ChangeNotifier {
     _disposed = true;
     _androidSub?.cancel();
     _statsTimer?.cancel();
+    _notifySoonTimer?.cancel();
+    _stats.dispose();
     _exitTimer?.cancel();
     _exitGeneration++;
     _phaseSub?.cancel();
@@ -503,22 +505,66 @@ class VpnController extends ChangeNotifier {
   // Locations
   // ---------------------------------------------------------------------------
 
-  /// Recommended first, then by ping (unknown ping last).
+  /// Recommended first, then by ping (unknown ping last), ties in list order.
+  /// While a round of pings runs the order holds still (it uses the previous
+  /// round's pings), so cards don't jump around as replies come in; it moves
+  /// once, when the round is done.
   List<Location> get locations {
     return _sortedCache ??= () {
-      final list = [..._locations];
-      int key(Location l) => l.isRecommended ? -1 : (_pings[l] ?? 1 << 30);
-      list.sort((a, b) => key(a).compareTo(key(b)));
-      return List<Location>.unmodifiable(list);
+      final measuring = _pinging.isNotEmpty;
+      int key(Location l) {
+        if (l.isRecommended) return -1;
+        final ms = measuring ? _orderPings[locationKey(l)] : _pings[l];
+        return ms ?? 1 << 30;
+      }
+
+      final indexed = [for (var i = 0; i < _locations.length; i++) (i, _locations[i])];
+      indexed.sort((a, b) {
+        final byPing = key(a.$2).compareTo(key(b.$2));
+        return byPing != 0 ? byPing : a.$1.compareTo(b.$1);
+      });
+      return List<Location>.unmodifiable([for (final e in indexed) e.$2]);
     }();
   }
+
+  /// The pings the order is based on while a new round runs (by [locationKey]).
+  Map<String, int?> _orderPings = const {};
+
+  /// A round of pings is running (the Locations refresh icon spins).
+  bool get pingingLocations => _pinging.isNotEmpty;
+
 
   /// null = no reply / not measured yet. Every location is pinged at its first
   /// server, Recommended included. While connected this stays the last value
   /// measured before connecting (refresh is off, and late replies are ignored).
-  int? pingOf(Location l) => _pings[l];
+  /// Recommended reads the ping of [fastestLocation], which is where it connects.
+  int? pingOf(Location l) {
+    if (l.isRecommended) {
+      final fastest = fastestLocation;
+      if (fastest != null) return _pings[fastest];
+    }
+    return _pings[l];
+  }
 
-  bool isPinging(Location l) => _pinging.contains(l);
+  bool isPinging(Location l) =>
+      l.isRecommended ? fastestLocation == null && _pinging.isNotEmpty : _pinging.contains(l);
+
+  /// The real location with the lowest ping; null until one has answered.
+  /// Recommended connects here (it only falls back to Mozilla's own pick when
+  /// nothing answered), so it is never slower than a location in the list.
+  Location? get fastestLocation {
+    Location? best;
+    int? bestMs;
+    for (final l in _locations) {
+      if (l.isRecommended) continue;
+      final ms = _pings[l];
+      if (ms != null && (bestMs == null || ms < bestMs)) {
+        best = l;
+        bestMs = ms;
+      }
+    }
+    return best;
+  }
 
   bool get loadingLocations => _loadingLocations;
 
@@ -546,6 +592,7 @@ class VpnController extends ChangeNotifier {
       final locations = await _loadLocations();
       _generation++;
       _locations = locations;
+      _orderPings = {for (final e in _pings.entries) locationKey(e.key): e.value};
       _pings.clear();
       _pinging.clear();
       _sortedCache = null;
@@ -568,6 +615,7 @@ class VpnController extends ChangeNotifier {
     final generation = _generation;
     final batch = [..._locations];
     _pinging.addAll(batch);
+    _sortedCache = null; // the order now holds still until the round is done
     _notify();
     await Future.wait(batch.map((location) async {
       int? ms;
@@ -580,9 +628,11 @@ class VpnController extends ChangeNotifier {
       final throughTunnel = _session != null || _tunStarting;
       if (!throughTunnel) _pings[location] = ms;
       _pinging.remove(location);
-      _sortedCache = null;
-      _notify();
+      _notifySoon();
     }));
+    if (_disposed || generation != _generation) return;
+    _sortedCache = null; // every reply is in: one reorder
+    _notify();
   }
 
   /// Persisted by country + city code; defaults to Recommended.
@@ -665,10 +715,46 @@ class VpnController extends ChangeNotifier {
   /// Country code (e.g. 'AT') from the same check; null if unknown.
   String? get exitCountryCode => _exitCountryCode;
 
+  /// Ticks once a [statsInterval] while connected and the app is on screen:
+  /// speeds, byte counts and the live quota. Kept apart from the controller's
+  /// own notifications so the once-a-second update only rebuilds what shows them.
+  Listenable get stats => _stats;
+  final _StatsTick _stats = _StatsTick();
+
+  bool _visible = true;
+
+  /// The UI reports when the app goes to the background and back. Nothing reads
+  /// the live stats meanwhile, so their timer stops (it would otherwise wake
+  /// the phone every second for as long as the VPN is up).
+  void setVisible(bool visible) {
+    if (visible == _visible || _disposed) return;
+    _visible = visible;
+    final session = _session;
+    if (!visible) {
+      _statsTimer?.cancel();
+      _statsTimer = null;
+    } else if (session != null && _statsTimer == null) {
+      _speed.reset();
+      _speed.sample(session.bytesUp, session.bytesDown, _clock()); // new baseline
+      _statsTimer = Timer.periodic(statsInterval, (_) => _onStatsTick());
+      _stats.tick();
+    }
+  }
+
   void _onStatsTick() {
     final session = _session;
     if (session != null) _speed.sample(session.bytesUp, session.bytesDown, _clock());
-    _notify();
+    if (!_disposed) _stats.tick();
+  }
+
+  Timer? _notifySoonTimer;
+
+  /// Coalesces bursts (one ping reply per location) into one notification.
+  void _notifySoon() {
+    _notifySoonTimer ??= Timer(const Duration(milliseconds: 32), () {
+      _notifySoonTimer = null;
+      _notify();
+    });
   }
 
   /// Looks up the exit IP once, [exitCheckDelay] from now. Replaces a check
@@ -790,17 +876,7 @@ class VpnController extends ChangeNotifier {
 
   /// Lowest ping among the real locations; else Recommended; else the selected one.
   Location? _fastestLocation() {
-    Location? best;
-    int? bestMs;
-    for (final l in _locations) {
-      if (l.isRecommended) continue;
-      final ms = _pings[l];
-      if (ms == null) continue;
-      if (bestMs == null || ms < bestMs) {
-        best = l;
-        bestMs = ms;
-      }
-    }
+    final best = fastestLocation;
     if (best != null) return best;
     for (final l in _locations) {
       if (l.isRecommended) return l;
@@ -809,8 +885,11 @@ class VpnController extends ChangeNotifier {
   }
 
   Future<void> connect() {
-    final location = _selected;
-    if (location == null || state != ConnState.idle || _shuttingDown) return Future.value();
+    final selected = _selected;
+    if (selected == null || state != ConnState.idle || _shuttingDown) return Future.value();
+    // Recommended = the fastest location right now (by the pings made before connecting).
+    final location = selected.isRecommended ? (fastestLocation ?? selected) : selected;
+    if (!identical(location, selected)) AppLog.write('Recommended: ${location.label} (${_pings[location]} ms)');
     final future = _doConnect(location);
     _connectFuture = future;
     return future.whenComplete(() {
@@ -913,7 +992,7 @@ class VpnController extends ChangeNotifier {
     }));
     _speed.reset();
     _speed.sample(session.bytesUp, session.bytesDown, _clock()); // baseline
-    _statsTimer = Timer.periodic(statsInterval, (_) => _onStatsTick());
+    if (_visible) _statsTimer = Timer.periodic(statsInterval, (_) => _onStatsTick());
     _scheduleExitCheck(session);
     _connecting = false;
     _notify();
@@ -996,8 +1075,9 @@ class VpnController extends ChangeNotifier {
   }
 
   /// The short status a platform may show for the running tunnel (the Android
-  /// notification): "Protected · Austria", or "Reconnecting…" while the upstream
-  /// is being restored. Recommended shows the country once the exit check knows it.
+  /// notification and the quick-settings tile): just where it is, "Austria", or
+  /// "Reconnecting…" while the upstream is being restored. Recommended shows the
+  /// country once the exit check knows it ("Connected" until then).
   String _statusLabel(Location? location) {
     if (_phase == VpnPhase.reconnecting) return 'Reconnecting…';
     String? country;
@@ -1014,7 +1094,7 @@ class VpnController extends ChangeNotifier {
         }
       }
     }
-    return country == null || country.isEmpty ? 'Protected' : 'Protected · $country';
+    return country == null || country.isEmpty ? 'Connected' : country;
   }
 
   Future<void> _stopQuietly(TunBackend? tun, VpnSession? session) async {
@@ -1025,4 +1105,8 @@ class VpnController extends ChangeNotifier {
       await session?.stop();
     } catch (_) {}
   }
+}
+
+class _StatsTick extends ChangeNotifier {
+  void tick() => notifyListeners();
 }

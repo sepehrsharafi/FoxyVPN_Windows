@@ -192,7 +192,7 @@ class _PowerSwitchState extends State<PowerSwitch> with SingleTickerProviderStat
                     onEnd: () {
                       if (!_busy && _spin.isAnimating) _spin.stop();
                     },
-                    child: CustomPaint(painter: _ArcPainter(_spin, FoxyColors.warn)),
+                    child: RepaintBoundary(child: CustomPaint(painter: _ArcPainter(_spin, FoxyColors.warn))),
                   ),
                 ),
               ),
@@ -210,28 +210,37 @@ class _ArcPainter extends CustomPainter {
   final Animation<double> animation;
   final Color color;
 
+  static const _sweep = math.pi * 0.9;
+
+  // Built once per size: only the rotation changes from frame to frame.
+  Size? _size;
+  late Rect _rect;
+  late Paint _paint;
+
   @override
   void paint(Canvas canvas, Size size) {
-    const sweep = math.pi * 0.9;
-    final center = size.center(Offset.zero);
-    final rect = Rect.fromCircle(center: center, radius: size.width / 2 - 1);
-    canvas.save();
-    canvas.translate(center.dx, center.dy);
-    canvas.rotate(animation.value * 2 * math.pi);
-    canvas.translate(-center.dx, -center.dy);
-    final paint = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 2
-      ..strokeCap = StrokeCap.round
-      ..shader = SweepGradient(
-        startAngle: 0,
-        endAngle: sweep,
-        colors: [color.withValues(alpha: 0), color],
-        stops: const [0.0, 1.0],
-        transform: const GradientRotation(0),
-      ).createShader(rect);
-    canvas.drawArc(rect, 0, sweep, false, paint);
-    canvas.restore();
+    if (size != _size) {
+      _size = size;
+      _rect = Rect.fromCircle(center: size.center(Offset.zero), radius: size.width / 2 - 1);
+      _paint = Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2
+        ..strokeCap = StrokeCap.round
+        ..shader = SweepGradient(
+          startAngle: 0,
+          endAngle: _sweep,
+          colors: [color.withValues(alpha: 0), color],
+          stops: const [0.0, 1.0],
+        ).createShader(_rect);
+    }
+    final center = _rect.center;
+    canvas
+      ..save()
+      ..translate(center.dx, center.dy)
+      ..rotate(animation.value * 2 * math.pi)
+      ..translate(-center.dx, -center.dy)
+      ..drawArc(_rect, 0, _sweep, false, _paint)
+      ..restore();
   }
 
   @override

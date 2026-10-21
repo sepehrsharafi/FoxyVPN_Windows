@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -13,12 +14,16 @@ import '../widgets/foxy_text_field.dart';
 import '../widgets/page_header.dart';
 import '../widgets/pressable.dart';
 import '../widgets/signal_bars.dart';
+import '../widgets/tabular_text.dart';
 
 /// Pick a location: search, Recommended first, then by ping.
 class LocationsScreen extends StatefulWidget {
   const LocationsScreen({super.key, required this.controller});
 
   final VpnController controller;
+
+  /// Diameter of the flags in the grid (Home draws them ahead of time).
+  static const flagSize = 30.0;
 
   @override
   State<LocationsScreen> createState() => _LocationsScreenState();
@@ -44,7 +49,7 @@ class _LocationsScreenState extends State<LocationsScreen> {
     Navigator.of(context).maybePop();
   }
 
-  /// Recommended first, then by ping (no reply last), then by name.
+  /// The controller's order (Recommended first, then by ping), filtered by the search.
   List<Location> _visible() {
     final query = _search.text.trim().toLowerCase();
     final all = _c.locations;
@@ -57,13 +62,7 @@ class _LocationsScreenState extends State<LocationsScreen> {
             l.countryCode.toLowerCase() == query)
           l,
     ];
-    int key(Location l) => l.isRecommended ? -1 : (_c.pingOf(l) ?? (1 << 30));
-    final indexed = [for (var i = 0; i < list.length; i++) (i, list[i])];
-    indexed.sort((a, b) {
-      final byPing = key(a.$2).compareTo(key(b.$2));
-      return byPing != 0 ? byPing : a.$1.compareTo(b.$1);
-    });
-    return [for (final e in indexed) e.$2];
+    return list; // already in order (the controller keeps it steady while pinging)
   }
 
   @override
@@ -75,7 +74,8 @@ class _LocationsScreenState extends State<LocationsScreen> {
           listenable: Listenable.merge([_c, _search]),
           builder: (context, _) {
             final state = _c.state;
-            final canRefresh = (state == ConnState.idle || state == ConnState.preparing) && !_c.loadingLocations;
+            final busy = _c.loadingLocations || _c.pingingLocations;
+            final canRefresh = (state == ConnState.idle || state == ConnState.preparing) && !busy;
             final connectedLike = state != ConnState.idle && state != ConnState.preparing;
             return Column(
               children: [
@@ -85,6 +85,8 @@ class _LocationsScreenState extends State<LocationsScreen> {
                     HeaderButton(
                       icon: FoxyIcons.refresh,
                       tooltip: connectedLike ? 'Can\'t refresh while connected' : 'Refresh',
+                      // Spins while the list loads and the pings come in.
+                      busy: busy && !connectedLike,
                       onTap: canRefresh ? () => unawaited(_c.refreshLocations().catchError((Object _) {})) : null,
                     ),
                   ],
@@ -141,28 +143,36 @@ class _LocationsScreenState extends State<LocationsScreen> {
     final showHeading = !searching && recommendedCard != null && rest.isNotEmpty;
     final staleError = _c.locationsError != null && !_c.loadingLocations;
 
+    // Refreshing: the old pings are about to be replaced, so every card shows
+    // the measuring spinner straight away instead of stale figures.
+    final refreshing = _c.loadingLocations;
+    final fastest = refreshing ? null : _c.fastestLocation;
     Widget card(Location l, {bool wide = false}) {
-      final showCity = (citiesPerCountry[l.countryCode] ?? 1) > 1;
-      final ms = _c.pingOf(l);
-      // The ping has its own place on every card; the line under the name is
-      // the city, and only for countries that have several.
-      final String? subtitle = !wide && showCity && l.cityName.isNotEmpty && l.cityName != l.countryName
-          ? l.cityName
-          : null;
+      final measuring = refreshing || _c.isPinging(l);
+      final String? detail;
+      if (l.isRecommended) {
+        // Recommended connects to the fastest location, so it says which.
+        detail = fastest != null ? 'Fastest · ${fastest.countryName}' : (measuring ? 'Finding the fastest' : 'Mozilla\'s pick');
+      } else {
+        // The city, only for countries that have several.
+        final showCity = (citiesPerCountry[l.countryCode] ?? 1) > 1;
+        detail = showCity && l.cityName.isNotEmpty && l.cityName != l.countryName ? l.cityName : null;
+      }
       return _LocationCard(
         location: l,
         selected: selectedKey != null && locationKey(l) == selectedKey,
-        subtitle: subtitle,
-        ms: ms,
-        measuring: _c.isPinging(l),
+        detail: detail,
+        ms: refreshing ? null : _c.pingOf(l),
+        measuring: measuring,
         wide: wide,
         onTap: () => _pick(l),
       );
     }
 
-    // Each card is flag + bars on top, name and subtitle below; the height follows the text scale.
+    // Flag beside two lines (name, then ping and city); the height follows the text scale.
     final scale = MediaQuery.textScalerOf(context).scale(1);
-    final cardExtent = 24 + 28 + 12 + (15 * 1.3 + 13 * 1.35) * scale;
+    // 24 padding + 2 border, plus a little slack for the ping row's baseline.
+    final cardExtent = 28.0 + math.max(LocationsScreen.flagSize, (15 * 1.3 + 3 + 13 * 1.4) * scale);
 
     return CustomScrollView(
       slivers: [
@@ -196,8 +206,8 @@ class _LocationsScreenState extends State<LocationsScreen> {
           sliver: SliverGrid(
             gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
               crossAxisCount: 2,
-              mainAxisSpacing: 12,
-              crossAxisSpacing: 12,
+              mainAxisSpacing: 10,
+              crossAxisSpacing: 10,
               mainAxisExtent: cardExtent,
             ),
             delegate: SliverChildBuilderDelegate((context, i) => card(rest[i]), childCount: rest.length),
@@ -255,18 +265,18 @@ class _SearchField extends StatelessWidget {
   }
 }
 
-/// One location: the flag top-left and the ping (bars plus "31 ms") top-right,
-/// the country name at the bottom and, under it, the city when its country has
-/// several (otherwise that line stays empty so every card is the same height
-/// and the names line up). Recommended is a full-width row with the ping on
-/// the right. Selected = `surfaceHi` fill plus a 1 px `textDim` border and the
-/// same ping as the others. Hover is a lighter fill only, so the two never
-/// look alike.
+/// One location, a flag beside two lines: the country (bold) and, under it,
+/// the ping and the city when its country has several ("31 ms · Vienna"), so
+/// the card is exactly as tall as its content. Recommended is the wide card on
+/// top; its line names the location it will really connect to (the fastest).
+///
+/// Selected = `surfaceHi` fill plus a 1 px `textDim` border. Hover is a lighter
+/// fill and hairline only, so the two never look alike.
 class _LocationCard extends StatelessWidget {
   const _LocationCard({
     required this.location,
     required this.selected,
-    required this.subtitle,
+    required this.detail,
     required this.ms,
     required this.measuring,
     required this.onTap,
@@ -275,7 +285,7 @@ class _LocationCard extends StatelessWidget {
 
   final Location location;
   final bool selected;
-  final String? subtitle;
+  final String? detail;
   final int? ms;
   final bool measuring;
   final bool wide;
@@ -287,52 +297,115 @@ class _LocationCard extends StatelessWidget {
     final title = l.isRecommended ? 'Recommended' : l.countryName;
     return Pressable(
       onTap: onTap,
-      semanticLabel: '${l.label}, ${PingReadout.describe(ms, measuring)}${selected ? ', selected' : ''}',
+      semanticLabel:
+          '${l.label}${detail == null ? '' : ', $detail'}, '
+          '${PingReadout.describe(ms, measuring)}${selected ? ', selected' : ''}',
       tooltip: l.isRecommended ? null : l.label,
-      builder: (context, s) {
-        final flag = FlagBadge(code: l.countryCode, recommended: l.isRecommended, size: 28);
-        final ping = PingReadout(ms: ms, measuring: measuring);
-        final name = Text(
-          title,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: FoxyText.label.copyWith(fontWeight: FontWeight.w700),
-        );
-        // Always one caption line tall, so cards without a city keep the same height.
-        final sub = subtitle == null
-            ? Text(' ', maxLines: 1, style: FoxyText.caption)
-            : Text(subtitle!, maxLines: 1, overflow: TextOverflow.ellipsis, style: FoxyText.caption);
-        return PressableBox(
-          state: s,
-          radius: FoxySpace.tileRadius,
-          base: selected ? FoxyColors.surfaceHi : FoxyColors.surface,
-          hover: selected ? FoxyColors.pressed : FoxyColors.surfaceHi,
-          pressed: FoxyColors.pressed,
-          // Hover also lifts the hairline, so it reads clearly without looking selected.
-          border: selected ? FoxyColors.textDim : (s.hovered ? FoxyColors.lineHi : FoxyColors.line),
-          padding: const EdgeInsets.all(12),
-          minHeight: wide ? 60 : null,
-          child: wide
-              ? Row(
-                  children: [
-                    flag,
-                    const SizedBox(width: 12),
-                    Expanded(child: name),
-                    const SizedBox(width: 8),
-                    ping,
-                  ],
-                )
-              : Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(children: [flag, const Spacer(), ping]),
-                    const Spacer(),
-                    name,
-                    sub,
-                  ],
+      builder: (context, s) => PressableBox(
+        state: s,
+        radius: FoxySpace.tileRadius,
+        base: selected ? FoxyColors.surfaceHi : FoxyColors.surface,
+        hover: selected ? FoxyColors.pressed : FoxyColors.surfaceHi,
+        pressed: FoxyColors.pressed,
+        // Hover also lifts the hairline, so it reads clearly without looking selected.
+        border: selected ? FoxyColors.textDim : (s.hovered ? FoxyColors.lineHi : FoxyColors.line),
+        minHeight: wide ? 68 : null,
+        alignment: AlignmentDirectional.centerStart,
+        padding: EdgeInsets.symmetric(horizontal: 12, vertical: wide ? 14 : 12),
+        child: Row(
+          children: [
+            FlagBadge(
+              code: l.countryCode,
+              recommended: l.isRecommended,
+              size: wide ? 36 : LocationsScreen.flagSize,
+            ),
+            SizedBox(width: wide ? 12 : 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: FoxyText.label.copyWith(fontWeight: FontWeight.w700),
+                  ),
+                  const SizedBox(height: 3),
+                  _PingLine(ms: ms, measuring: measuring, detail: detail),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// "31 ms · Vienna": the ping (tabular, 13 / 600 `textDim`), then [detail].
+/// Measuring is a tiny spinner; no reply is "No reply" in `textFaint`.
+class _PingLine extends StatelessWidget {
+  const _PingLine({required this.ms, required this.measuring, required this.detail});
+
+  final int? ms;
+  final bool measuring;
+  final String? detail;
+
+  @override
+  Widget build(BuildContext context) {
+    final value = ms;
+    final style = FoxyText.caption.copyWith(fontSize: 13, fontWeight: FontWeight.w600, color: FoxyColors.textDim);
+    // (caption sets height 1.35; the fixed line below relies on it)
+    final Widget figure;
+    if (value != null) {
+      figure = TabularText('$value ms', style: style);
+    } else if (measuring) {
+      figure = const Padding(
+        padding: EdgeInsets.only(right: 6),
+        child: SizedBox.square(
+          dimension: 10,
+          child: CircularProgressIndicator(strokeWidth: 1.5, color: FoxyColors.textFaint, strokeCap: StrokeCap.round),
+        ),
+      );
+    } else {
+      figure = Text('No reply', maxLines: 1, style: style.copyWith(color: FoxyColors.textFaint));
+    }
+    final rest = detail;
+    // A short crossfade when the spinner turns into the ping (keyed by kind, so a
+    // new figure for the same kind just updates in place).
+    final kind = value != null ? 'ms' : (measuring ? 'spin' : 'none');
+    // Always one text line tall, spinner or not, so nothing on the card moves
+    // when a refresh swaps the figures for spinners and back.
+    final lineHeight = MediaQuery.textScalerOf(context).scale(style.fontSize!) * style.height!;
+    return ExcludeSemantics(
+      child: SizedBox(
+        height: lineHeight,
+        child: AnimatedSwitcher(
+          duration: FoxySpace.fast,
+          switchInCurve: Curves.easeOut,
+          switchOutCurve: Curves.easeIn,
+          layoutBuilder: (current, previous) => Stack(
+            alignment: AlignmentDirectional.centerStart,
+            children: [...previous, ?current],
+          ),
+          child: Row(
+            key: ValueKey(kind),
+            children: [
+              figure,
+              if (rest != null)
+                Flexible(
+                  child: Text(
+                    value == null && measuring ? rest : ' · $rest',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: style.copyWith(fontWeight: FontWeight.w500),
+                  ),
                 ),
-        );
-      },
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
