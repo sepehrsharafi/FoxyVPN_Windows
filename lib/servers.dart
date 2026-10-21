@@ -6,7 +6,12 @@ import 'dart:io';
 const _serverListUrl =
     'https://firefox.settings.services.mozilla.com/v1/buckets/main/collections/vpn-serverlist/records';
 
-const mozillaVpnUserAgent = 'MozillaVPN/2.35.0 (sys:windows; iap:true)';
+/// The Mozilla VPN client's user agent for the platform we run on (the
+/// official clients send sys:windows / sys:android). Windows is unchanged.
+final mozillaVpnUserAgent = mozillaVpnUserAgentFor(android: Platform.isAndroid);
+
+String mozillaVpnUserAgentFor({required bool android}) =>
+    'MozillaVPN/2.35.0 (sys:${android ? 'android' : 'windows'}; iap:true)';
 
 const _excludedCountries = {'catchall anycast'};
 

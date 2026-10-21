@@ -313,6 +313,40 @@ void main() {
       );
     });
 
+    test('reserved routes whose delete failed are found in the table, the others are not', () {
+      const a = ReservedRoute('10.0.0.0/8', 21, '192.168.1.1');
+      const b = ReservedRoute('172.16.0.0/12', 21, '192.168.1.1');
+      const c = ReservedRoute('fc00::/7', 21, 'fe80::1');
+      const d = ReservedRoute('169.254.0.0/16', 21);
+      final table4 = [
+        RouteEntry(IpPrefix.parse('10.0.0.0/8')!, 1, gateway: '192.168.1.1', interfaceIp: '192.168.1.101'),
+        // Same prefix, but through our tunnel or another adapter: not the route we added.
+        RouteEntry(IpPrefix.parse('172.16.0.0/12')!, 1, gateway: '192.168.1.1', interfaceIp: '10.9.9.9'),
+        RouteEntry(IpPrefix.parse('169.254.0.0/16')!, 1, interfaceIp: '198.18.0.1', viaTun: true),
+      ];
+      final table6 = [RouteEntry(IpPrefix.parse('fc00::/7')!, 1, gateway: 'fe80::1', interfaceIndex: 21)];
+      expect(
+        reservedRoutesStillPresent(
+          [a, b, c, d],
+          table4: table4,
+          table6: table6,
+          interfaceIpV4: '192.168.1.101',
+        ),
+        [a, c],
+      );
+      // Adapter unknown: any adapter's matching route counts (stays recorded).
+      expect(
+        reservedRoutesStillPresent([a, b, d], table4: table4),
+        [a, b],
+      );
+      // IPv6 matches by interface index.
+      expect(
+        reservedRoutesStillPresent([const ReservedRoute('fc00::/7', 22, 'fe80::1')], table4: const [], table6: table6),
+        isEmpty,
+      );
+      expect(reservedRoutesStillPresent([a, c], table4: const [], table6: const []), isEmpty);
+    });
+
     test('the prefixes are the ones asked for', () {
       expect(reservedPrefixesV4, [
         '10.0.0.0/8',

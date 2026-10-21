@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:foxyvpn/fxa.dart';
+import 'package:foxyvpn/platform/host.dart';
 import 'package:foxyvpn/servers.dart';
 import 'package:foxyvpn/ui/app.dart';
 import 'package:foxyvpn/ui/widgets/tabular_text.dart';
@@ -296,6 +297,30 @@ Future<void> pumpApp(WidgetTester tester, FakeVpnController controller, {Key? bo
       child: FoxyApp(controller: controller),
     ),
   );
+  await tester.pump(const Duration(milliseconds: 300));
+}
+
+/// Pumps the whole app like on an Android phone: the Android host (no title
+/// bar, "Tap"), a screen of [size] dp with a status bar of [top] dp and a
+/// navigation bar of [bottom] dp, and the system text scale [textScale].
+Future<void> pumpPhone(
+  WidgetTester tester,
+  FakeVpnController controller, {
+  Size size = const Size(360, 640),
+  double top = 24,
+  double bottom = 48,
+  double textScale = 1.0,
+}) async {
+  Host.debugOverride = HostOs.android;
+  addTearDown(() => Host.debugOverride = null);
+  tester.view.physicalSize = size;
+  tester.view.devicePixelRatio = 1;
+  tester.view.padding = FakeViewPadding(top: top, bottom: bottom);
+  tester.view.viewPadding = FakeViewPadding(top: top, bottom: bottom);
+  tester.platformDispatcher.textScaleFactorTestValue = textScale;
+  addTearDown(tester.view.reset);
+  addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+  await tester.pumpWidget(FoxyApp(controller: controller));
   await tester.pump(const Duration(milliseconds: 300));
 }
 

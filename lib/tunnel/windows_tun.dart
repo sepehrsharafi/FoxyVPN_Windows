@@ -41,6 +41,17 @@
 // If Windows shuts down or the app is killed, a SYSTEM scheduled task
 // (FoxyVPN-DnsCleanup, at boot and at logon) removes the rule, so DNS is not
 // stuck on 1.1.1.1 until FoxyVPN is opened again.
+// Speed: external programs are slow to start (netsh ~60-100 ms, PowerShell 0.5-1.5 s),
+// so setup and teardown use as few as possible and run them side by side:
+//  * connect: the netsh commands of a step go into ONE netsh session fed through
+//    stdin (no script file, see [netshScript]); the safety-net task and the NRPT
+//    rule are ONE PowerShell launch that runs while the adapter comes up; the
+//    adapter's interface index comes from dart:io, not PowerShell;
+//  * disconnect ([WindowsTun.stop]): tun2socks is killed FIRST, which makes
+//    Windows remove the adapter and with it its address and routes, so those are
+//    not deleted one by one; then the routes on the real adapter, the DNS rule +
+//    task + cache (one PowerShell launch) and the wait for the adapter to vanish
+//    run together. Both log how long they took.
 // The app's own control-plane IPs get /32 bypass routes too (defence in depth).
 // tun2socks is also put in a Windows job object, so it dies with the app even
 // if the app crashes (if that is not possible, the VPN refuses to start).
@@ -49,6 +60,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
@@ -208,11 +220,11 @@ int? parseInterfaceIndex(String output) {
 /// It is stored in the registry (persistent), hence the comment to find it again.
 const nrptComment = 'FoxyVPN';
 
-Cmd nrptAddCmd() => _powershell(
-  "\$ErrorActionPreference = 'Stop'; "
-  "Add-DnsClientNrptRule -Namespace '.' -NameServers ${tunDnsServers.map((s) => "'$s'").join(',')} "
-  "-Comment '$nrptComment'",
-);
+String _nrptAddScript() =>
+    "Add-DnsClientNrptRule -Namespace '.' -NameServers ${tunDnsServers.map((s) => "'$s'").join(',')} "
+    "-Comment '$nrptComment'";
+
+Cmd nrptAddCmd() => _powershell("\$ErrorActionPreference = 'Stop'; ${_nrptAddScript()}");
 
 /// Removes every rule carrying our comment (also leftovers of crashed runs).
 /// Errors are terminating, so a failed removal gives a non-zero exit code.
@@ -257,20 +269,50 @@ String _psQuote(String s) => "'${s.replaceAll("'", "''")}'";
 /// Registers the task with the ScheduledTasks cmdlets, without any file: a file
 /// in the user's profile could be swapped by other (non-elevated) programs
 /// before the elevated app registers it as a SYSTEM task.
-Cmd dnsCleanupTaskRegisterCmd() => _powershell(
-  "\$ErrorActionPreference = 'Stop'; "
-  '\$a = New-ScheduledTaskAction -Execute ${_psQuote(_powershellExe)} '
-  '-Argument ${_psQuote(dnsCleanupPowershellArgs().join(' '))}; '
-  '\$t = @((New-ScheduledTaskTrigger -AtStartup), (New-ScheduledTaskTrigger -AtLogOn)); '
-  "\$t[0].Delay = 'PT30S'; \$t[1].Delay = 'PT10S'; "
-  "\$p = New-ScheduledTaskPrincipal -UserId 'S-1-5-18' -LogonType ServiceAccount -RunLevel Highest; "
-  '\$s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries '
-  '-StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 5); '
-  "Register-ScheduledTask -TaskName '$dnsCleanupTaskName' -Action \$a -Trigger \$t "
-  '-Principal \$p -Settings \$s -Force | Out-Null',
-);
+String _taskRegisterScript() =>
+    '\$a = New-ScheduledTaskAction -Execute ${_psQuote(_powershellExe)} '
+    '-Argument ${_psQuote(dnsCleanupPowershellArgs().join(' '))}; '
+    '\$t = @((New-ScheduledTaskTrigger -AtStartup), (New-ScheduledTaskTrigger -AtLogOn)); '
+    "\$t[0].Delay = 'PT30S'; \$t[1].Delay = 'PT10S'; "
+    "\$p = New-ScheduledTaskPrincipal -UserId 'S-1-5-18' -LogonType ServiceAccount -RunLevel Highest; "
+    '\$s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries '
+    '-StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 5); '
+    "Register-ScheduledTask -TaskName '$dnsCleanupTaskName' -Action \$a -Trigger \$t "
+    '-Principal \$p -Settings \$s -Force | Out-Null';
+
+Cmd dnsCleanupTaskRegisterCmd() =>
+    _powershell("\$ErrorActionPreference = 'Stop'; ${_taskRegisterScript()}");
 
 Cmd dnsCleanupTaskDeleteCmd() => Cmd('schtasks', ['/Delete', '/TN', dnsCleanupTaskName, '/F']);
+
+/// Exit code of [dnsRemoveCmd] when the NRPT rule could not be removed.
+const dnsRemoveFailedExitCode = 3;
+
+/// Connect: the safety-net task AND the NRPT rule in ONE PowerShell launch (each
+/// launch costs 0.5-1.5 s). The task is best effort (a failure is only written
+/// to stderr); the rule is mandatory: if it cannot be added the script fails.
+Cmd dnsSetupCmd() => _powershell(
+  "\$ErrorActionPreference = 'Stop'; "
+  'try { ${_taskRegisterScript()} } '
+  "catch { [Console]::Error.WriteLine('Could not register the DNS cleanup task: ' + \$_) }; "
+  '${_nrptAddScript()}',
+);
+
+/// Disconnect: remove the NRPT rule, then (only if that worked, so the task
+/// stays as the fallback otherwise) the safety-net task, then flush the DNS
+/// cache: all in ONE PowerShell launch. Exits with [dnsRemoveFailedExitCode]
+/// when the rule is still there.
+Cmd dnsRemoveCmd() => _powershell(
+  '\$rc = 0; '
+  "try { \$ErrorActionPreference = 'Stop'; "
+  "Get-DnsClientNrptRule | Where-Object { \$_.Comment -eq '$nrptComment' } | "
+  'Remove-DnsClientNrptRule -Force } '
+  'catch { \$rc = $dnsRemoveFailedExitCode }; '
+  "\$ErrorActionPreference = 'SilentlyContinue'; "
+  'if (\$rc -eq 0) { & "\$env:SystemRoot\\System32\\schtasks.exe" /Delete /TN $dnsCleanupTaskName /F | Out-Null }; '
+  'Clear-DnsClientCache; '
+  'exit \$rc',
+);
 
 /// What the state file may contain. Every value is validated, because it ends
 /// up in elevated commands; anything invalid becomes null.
@@ -583,19 +625,40 @@ List<ReservedRoute> withoutExistingRoutes(
   required List<RouteEntry> table4,
   required String interfaceIpV4,
   List<RouteEntry> table6 = const [],
-}) {
-  bool exists(ReservedRoute r) => (r.isV6 ? table6 : table4).any(
-    (e) =>
-        !e.viaTun &&
-        e.prefix.text == r.prefix &&
-        e.gateway == r.nextHop &&
-        (r.isV6 ? e.interfaceIndex == r.interfaceIndex : e.interfaceIp == interfaceIpV4),
-  );
-  return [
-    for (final r in plan)
-      if (!exists(r)) r,
-  ];
-}
+}) => [
+  for (final r in plan)
+    if (!_reservedRouteInTables(r, table4, table6, interfaceIpV4)) r,
+];
+
+/// Of the [routes] we added, those that are still in the routing tables (a
+/// `netsh delete` that failed, or a table that changed since). The IPv4 table has no
+/// interface index, so [interfaceIpV4] (the real adapter's address when they were
+/// added) tells ours from another adapter's route with the same prefix; null
+/// matches any adapter (the safe side: the route stays recorded).
+List<ReservedRoute> reservedRoutesStillPresent(
+  List<ReservedRoute> routes, {
+  required List<RouteEntry> table4,
+  List<RouteEntry> table6 = const [],
+  String? interfaceIpV4,
+}) => [
+  for (final r in routes)
+    if (_reservedRouteInTables(r, table4, table6, interfaceIpV4)) r,
+];
+
+bool _reservedRouteInTables(
+  ReservedRoute r,
+  List<RouteEntry> table4,
+  List<RouteEntry> table6,
+  String? interfaceIpV4,
+) => (r.isV6 ? table6 : table4).any(
+  (e) =>
+      !e.viaTun &&
+      e.prefix.text == r.prefix &&
+      e.gateway == r.nextHop &&
+      (r.isV6
+          ? e.interfaceIndex == r.interfaceIndex
+          : interfaceIpV4 == null || e.interfaceIp == interfaceIpV4),
+);
 
 Cmd addReservedRouteCmd(ReservedRoute r) => Cmd('netsh', [
   'interface',
@@ -871,11 +934,486 @@ List<String> tun2socksArgs(int socksPort) => [
 ];
 
 // ---------------------------------------------------------------------------
+// Batching and lookups (pure parts tested in test/windows_tun_test.dart)
+// ---------------------------------------------------------------------------
+
+/// What may appear in a netsh argument that is typed into a netsh session: no
+/// whitespace, quotes or control characters, so an argument can never smuggle a
+/// second command into the session (the state file is the only outside input).
+final _safeNetshArg = RegExp(r'^[A-Za-z0-9_.:/=\-]+$');
+
+/// The text typed into ONE interactive `netsh` session that runs all [cmds]
+/// (netsh is slow to start, so N commands in N processes cost N times as much).
+/// The session goes through stdin: no file, so nothing in a user-writable place
+/// can be swapped before the elevated netsh reads it. netsh carries on after a
+/// failing command and exits non-zero if any command failed.
+String netshScript(Iterable<Cmd> cmds) {
+  final lines = <String>[];
+  for (final cmd in cmds) {
+    if (cmd.exe != 'netsh') throw ArgumentError.value(cmd.exe, 'cmds', 'not a netsh command');
+    for (final arg in cmd.args) {
+      if (!_safeNetshArg.hasMatch(arg)) throw ArgumentError.value(arg, 'cmds', 'unsafe netsh argument');
+    }
+    lines.add(cmd.args.join(' '));
+  }
+  lines.add('exit');
+  return '${lines.join('\r\n')}\r\n';
+}
+
+/// netsh's session output without the `netsh>` prompts and empty lines.
+String cleanNetshOutput(String raw) => raw
+    .split(RegExp(r'\r?\n'))
+    .map((l) => l.replaceAll('netsh>', '').trim())
+    .where((l) => l.isNotEmpty)
+    .join(' | ');
+
+/// The interface index that owns [ip], from `index -> addresses`.
+int? interfaceIndexForAddress(Map<int, Iterable<String>> addressesByIndex, String ip) {
+  for (final e in addressesByIndex.entries) {
+    if (e.value.contains(ip)) return e.key;
+  }
+  return null;
+}
+
+/// Both of our IPv6 /1 routes are on the tunnel adapter.
+bool ipv6TunnelRoutesPresent(List<RouteEntry> table6) =>
+    ['::/1', '8000::/1'].every((p) => table6.any((e) => e.viaTun && e.prefix.text == p));
+
+/// Runs [jobs] with at most [limit] at a time; the results keep the order of [jobs].
+Future<List<T>> inParallel<T>(List<Future<T> Function()> jobs, {int limit = 6}) async {
+  final results = List<T?>.filled(jobs.length, null);
+  var next = 0;
+  Future<void> worker() async {
+    while (next < jobs.length) {
+      final i = next++;
+      results[i] = await jobs[i]();
+    }
+  }
+
+  await Future.wait([for (var i = 0; i < limit && i < jobs.length; i++) worker()]);
+  return [for (final r in results) r as T];
+}
+
+// ---------------------------------------------------------------------------
+// Install record and the Wintun driver
+// ---------------------------------------------------------------------------
+
+/// The service key the Wintun driver registers; present if the driver is installed
+/// (checked read-only; WireGuard, other VPNs and FoxyVPN all share this driver).
+const wintunServiceKey = r'HKLM\SYSTEM\CurrentControlSet\Services\Wintun';
+
+Cmd wintunDriverQueryCmd() => const Cmd('reg', ['query', wintunServiceKey, '/v', 'ImagePath']);
+
+String get foxyProgramDataDir => '${Platform.environment['ProgramData'] ?? r'C:\ProgramData'}\\FoxyVPN';
+
+File get installRecordFile => File('$foxyProgramDataDir\\install.json');
+
+/// `{"wintunPreexisting": true}`: was the Wintun driver already on this PC before
+/// FoxyVPN first created an adapter? Decides on uninstall whether FoxyVPN may
+/// remove the driver again.
+String installRecordJson({required bool wintunPreexisting}) =>
+    jsonEncode({'wintunPreexisting': wintunPreexisting});
+
+/// The recorded value; null when the text is missing or not what we wrote.
+bool? parseWintunPreexisting(String text) {
+  try {
+    final json = jsonDecode(text);
+    final value = json is Map ? json['wintunPreexisting'] : null;
+    return value is bool ? value : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+/// Admin-only folder: SYSTEM and Administrators, nothing inherited. The first
+/// two commands are best effort (take the folder over if somebody else made it,
+/// drop explicit entries), the last one is what counts.
+List<Cmd> adminOnlyDirCmds(String dir) => [
+  Cmd('icacls', [dir, '/setowner', '*S-1-5-32-544']),
+  Cmd('icacls', [dir, '/reset']),
+  Cmd('icacls', [dir, '/inheritance:r', '/grant:r', '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F']),
+];
+
+/// null if the check itself could not run.
+Future<bool?> wintunDriverInstalled() async {
+  try {
+    return (await _run(wintunDriverQueryCmd(), timeout: const Duration(seconds: 15))).exitCode == 0;
+  } catch (_) {
+    return null;
+  }
+}
+
+/// SIDs that may own install.json: SYSTEM and BUILTIN\Administrators (a SID, not
+/// a name: the names are translated on non-English Windows).
+const trustedInstallRecordOwners = {'S-1-5-18', 'S-1-5-32-544'};
+
+bool isTrustedInstallRecordOwner(String? sid) =>
+    sid != null && trustedInstallRecordOwners.contains(sid.trim().toUpperCase());
+
+enum InstallRecordTrust {
+  /// No record.
+  missing,
+
+  /// Owned by SYSTEM or Administrators and in the format we write.
+  trusted,
+
+  /// Anything else: a standard user could have written it.
+  untrusted,
+}
+
+/// Whether an existing install.json may be believed. [ownerSid] is null when the
+/// owner could not be read, which counts as untrusted.
+InstallRecordTrust classifyInstallRecord({required bool exists, String? ownerSid, String? text}) {
+  if (!exists) return InstallRecordTrust.missing;
+  if (!isTrustedInstallRecordOwner(ownerSid)) return InstallRecordTrust.untrusted;
+  if (text == null || parseWintunPreexisting(text) == null) return InstallRecordTrust.untrusted;
+  return InstallRecordTrust.trusted;
+}
+
+/// What to write when the record has to be made (again). null: write nothing
+/// (the driver state cannot be checked, and nothing untrusted was there; the next
+/// start tries again). After an untrusted record was removed, "cannot tell" is
+/// recorded as `true`, the safe value: the driver is never deleted.
+bool? wintunPreexistingToRecord({required bool? driverInstalled, required bool replacedUntrusted}) {
+  if (driverInstalled != null) return driverInstalled;
+  return replacedUntrusted ? true : null;
+}
+
+typedef _GetNamedSecurityInfoNative =
+    Uint32 Function(
+      Pointer<Utf16>,
+      Int32,
+      Uint32,
+      Pointer<Pointer<Void>>,
+      Pointer<Pointer<Void>>,
+      Pointer<Pointer<Void>>,
+      Pointer<Pointer<Void>>,
+      Pointer<Pointer<Void>>,
+    );
+typedef _GetNamedSecurityInfoDart =
+    int Function(
+      Pointer<Utf16>,
+      int,
+      int,
+      Pointer<Pointer<Void>>,
+      Pointer<Pointer<Void>>,
+      Pointer<Pointer<Void>>,
+      Pointer<Pointer<Void>>,
+      Pointer<Pointer<Void>>,
+    );
+typedef _SidToStringNative = Int32 Function(Pointer<Void>, Pointer<Pointer<Utf16>>);
+typedef _SidToStringDart = int Function(Pointer<Void>, Pointer<Pointer<Utf16>>);
+typedef _LocalFreeNative = Pointer<Void> Function(Pointer<Void>);
+typedef _LocalFreeDart = Pointer<Void> Function(Pointer<Void>);
+
+/// The owner of a file or folder as a SID string ("S-1-5-32-544"), read-only,
+/// through advapi32 (no process to start); null if it cannot be read.
+String? fileOwnerSid(String path) {
+  Pointer<Utf16>? nameC;
+  Pointer<Pointer<Void>>? owner;
+  Pointer<Pointer<Void>>? descriptor;
+  Pointer<Pointer<Utf16>>? text;
+  _LocalFreeDart? localFree;
+  try {
+    final advapi = DynamicLibrary.open('advapi32.dll');
+    localFree = DynamicLibrary.open('kernel32.dll').lookupFunction<_LocalFreeNative, _LocalFreeDart>('LocalFree');
+    final getInfo = advapi.lookupFunction<_GetNamedSecurityInfoNative, _GetNamedSecurityInfoDart>(
+      'GetNamedSecurityInfoW',
+    );
+    final sidToString = advapi.lookupFunction<_SidToStringNative, _SidToStringDart>('ConvertSidToStringSidW');
+    nameC = path.toNativeUtf16();
+    owner = calloc<Pointer<Void>>();
+    descriptor = calloc<Pointer<Void>>();
+    text = calloc<Pointer<Utf16>>();
+    // SE_FILE_OBJECT = 1, OWNER_SECURITY_INFORMATION = 1
+    final error = getInfo(nameC, 1, 1, owner, nullptr, nullptr, nullptr, descriptor);
+    if (error != 0 || owner.value == nullptr) return null;
+    if (sidToString(owner.value, text) == 0) return null;
+    return text.value.toDartString();
+  } catch (_) {
+    return null;
+  } finally {
+    try {
+      if (text != null && text.value != nullptr) localFree?.call(text.value.cast());
+      if (descriptor != null && descriptor.value != nullptr) localFree?.call(descriptor.value);
+    } catch (_) {}
+    for (final p in [nameC, owner, descriptor, text]) {
+      if (p != null) calloc.free(p);
+    }
+  }
+}
+
+/// Reads install.json and judges it ([classifyInstallRecord]); [ownerOf] is for tests.
+InstallRecordTrust checkInstallRecord(File file, {String? Function(String path)? ownerOf}) {
+  try {
+    final type = FileSystemEntity.typeSync(file.path, followLinks: false);
+    if (type == FileSystemEntityType.notFound) return InstallRecordTrust.missing;
+    if (type != FileSystemEntityType.file) return InstallRecordTrust.untrusted; // a link, a folder
+    return classifyInstallRecord(
+      exists: true,
+      ownerSid: (ownerOf ?? fileOwnerSid)(file.path),
+      text: file.readAsStringSync(),
+    );
+  } catch (_) {
+    return InstallRecordTrust.untrusted;
+  }
+}
+
+/// Makes sure [dir] exists, is a real folder and is locked to SYSTEM and
+/// Administrators ([adminOnlyDirCmds]). Done at every start: a standard user may
+/// have created the folder first. False if the final lock did not work.
+Future<bool> _lockInstallRecordDir(Directory dir, void Function(String)? log) async {
+  try {
+    if (FileSystemEntity.isLinkSync(dir.path)) {
+      log?.call('${dir.path} is a link; removing the link');
+      Link(dir.path).deleteSync();
+    }
+    if (!dir.existsSync()) dir.createSync(recursive: true);
+    final cmds = adminOnlyDirCmds(dir.path);
+    var locked = true;
+    for (var i = 0; i < cmds.length; i++) {
+      final ok = await _runOk(cmds[i], log);
+      if (!ok && i == cmds.length - 1) locked = false;
+    }
+    if (!locked) log?.call('Could not restrict ${dir.path} to administrators');
+    return locked;
+  } catch (e) {
+    log?.call('Could not prepare ${dir.path}: $e');
+    return false;
+  }
+}
+
+/// Before FoxyVPN creates an adapter: records at `%ProgramData%\FoxyVPN\install.json`
+/// whether the Wintun driver was already installed. Every start, the folder is
+/// locked to administrators again and an existing record is trusted only if
+/// SYSTEM or Administrators own it ([checkInstallRecord]); anything else is
+/// deleted and recorded afresh. A trusted record is left alone.
+Future<void> recordWintunDriverState({void Function(String)? log}) async {
+  try {
+    final file = installRecordFile;
+    final locked = await _lockInstallRecordDir(file.parent, log);
+    final trust = checkInstallRecord(file);
+    if (trust == InstallRecordTrust.trusted) return;
+    if (trust == InstallRecordTrust.untrusted) {
+      log?.call('${file.path} is not owned by SYSTEM or Administrators (or is unreadable); discarding it');
+      try {
+        if (FileSystemEntity.isDirectorySync(file.path)) {
+          Directory(file.path).deleteSync(recursive: true);
+        } else {
+          file.deleteSync();
+        }
+      } catch (e) {
+        log?.call('Could not delete it: $e');
+      }
+      if (FileSystemEntity.typeSync(file.path, followLinks: false) != FileSystemEntityType.notFound) return;
+    }
+    if (!locked) {
+      log?.call('Not recording the driver state');
+      return;
+    }
+    final present = await wintunDriverInstalled();
+    final value = wintunPreexistingToRecord(
+      driverInstalled: present,
+      replacedUntrusted: trust == InstallRecordTrust.untrusted,
+    );
+    if (value == null) {
+      log?.call('Could not check whether the Wintun driver is installed');
+      return;
+    }
+    await file.writeAsString(installRecordJson(wintunPreexisting: value), flush: true);
+    // Administrators own what an elevated process creates, unless a policy says otherwise.
+    await _runOk(Cmd('icacls', [file.path, '/setowner', '*S-1-5-32-544']), log);
+    log?.call(
+      present == null
+          ? 'Could not tell if the Wintun driver is installed; FoxyVPN will never remove it'
+          : 'Wintun driver ${present ? 'was already installed' : 'is not installed yet (FoxyVPN will add it)'}',
+    );
+  } catch (e) {
+    log?.call('Could not record the Wintun driver state: $e');
+  }
+}
+
+/// True only if a trusted record says FoxyVPN itself installed the driver. A
+/// missing, unreadable or untrusted record means "leave the driver alone".
+bool wintunInstalledByFoxy({File? file, String? Function(String path)? ownerOf}) {
+  try {
+    final f = file ?? installRecordFile;
+    if (checkInstallRecord(f, ownerOf: ownerOf) != InstallRecordTrust.trusted) return false;
+    return parseWintunPreexisting(f.readAsStringSync()) == false;
+  } catch (_) {
+    return false;
+  }
+}
+
+Directory get appDirectory => File(Platform.resolvedExecutable).parent;
+
+/// `%APPDATA%\FoxyVPN\tun-state.json`: what a running tunnel has set up. It stays
+/// behind only if a cleanup was incomplete (or the app crashed).
+File get tunStateFile {
+  final appData = Platform.environment['APPDATA'] ?? Directory.systemTemp.path;
+  return File('$appData\\FoxyVPN\\tun-state.json');
+}
+
+/// Stops a tun2socks.exe that was started from [exePath] (ours, in the install
+/// folder) and no other: someone may run their own tun2socks.
+Cmd stopOwnTun2socksCmd(String exePath) => _powershell(
+  'Get-Process -Name tun2socks -ErrorAction SilentlyContinue | '
+  "Where-Object { \$_.Path -eq ${_psQuote(exePath)} } | "
+  'Stop-Process -Force -ErrorAction SilentlyContinue',
+);
+
+// dart:ffi into wintun.dll. Run in a separate isolate so a call that blocks
+// cannot freeze the app (the caller puts a timeout on the isolate).
+typedef _OpenAdapterNative = Pointer<Void> Function(Pointer<Utf16>);
+typedef _OpenAdapterDart = Pointer<Void> Function(Pointer<Utf16>);
+typedef _CloseAdapterNative = Void Function(Pointer<Void>);
+typedef _CloseAdapterDart = void Function(Pointer<Void>);
+typedef _DeleteDriverNative = Int32 Function();
+typedef _DeleteDriverDart = int Function();
+
+/// 0: there is no such adapter, 1: removed, 2: still there after closing it.
+int _removeAdapterSync(String dllPath, String name) {
+  final lib = DynamicLibrary.open(dllPath);
+  final open = lib.lookupFunction<_OpenAdapterNative, _OpenAdapterDart>('WintunOpenAdapter');
+  final close = lib.lookupFunction<_CloseAdapterNative, _CloseAdapterDart>('WintunCloseAdapter');
+  final nameC = name.toNativeUtf16();
+  try {
+    final adapter = open(nameC);
+    if (adapter == nullptr) return 0;
+    close(adapter); // releases the handle and, for the adapter's creator, deletes it
+    final again = open(nameC);
+    if (again == nullptr) return 1;
+    close(again);
+    return 2;
+  } finally {
+    calloc.free(nameC);
+  }
+}
+
+/// WintunDeleteDriver: removes the driver only if no adapter uses it. 1 on success.
+int _deleteDriverSync(String dllPath) {
+  final lib = DynamicLibrary.open(dllPath);
+  return lib.lookupFunction<_DeleteDriverNative, _DeleteDriverDart>('WintunDeleteDriver')();
+}
+
+/// Fallback when closing the handle did not delete the adapter: remove the
+/// device through Plug and Play (only an adapter called FoxyVPN made by Wintun).
+Cmd wintunAdapterRemoveCmd() => _powershell(
+  "\$ErrorActionPreference = 'Stop'; "
+  "Get-NetAdapter -Name '$tunName' -IncludeHidden -ErrorAction SilentlyContinue | "
+  "Where-Object { \$_.InterfaceDescription -like 'Wintun*' } | "
+  'ForEach-Object { & "\$env:SystemRoot\\System32\\pnputil.exe" /remove-device \$_.PnPDeviceID | Out-Null }',
+);
+
+/// Removes a leftover "FoxyVPN" Wintun adapter. True when none is left.
+Future<bool> removeWintunAdapter({void Function(String)? log}) async {
+  final dll = '${appDirectory.path}\\wintun.dll';
+  if (!File(dll).existsSync()) {
+    log?.call('wintun.dll not found, cannot remove the "$tunName" adapter');
+    return false;
+  }
+  Future<int> attempt() async {
+    try {
+      return await Isolate.run(() => _removeAdapterSync(dll, tunName)).timeout(const Duration(seconds: 15));
+    } catch (e) {
+      log?.call('Removing the "$tunName" adapter failed: $e');
+      return -1;
+    }
+  }
+
+  var code = await attempt();
+  if (code == 2 || code == -1) {
+    log?.call('Removing the adapter through Plug and Play');
+    await _runOk(wintunAdapterRemoveCmd(), log);
+    code = await attempt();
+  }
+  if (code == 0 || code == 1) {
+    log?.call(code == 1 ? 'Removed the "$tunName" adapter' : 'No "$tunName" adapter is left');
+    return true;
+  }
+  log?.call('The "$tunName" adapter could not be removed');
+  return false;
+}
+
+/// WintunDeleteDriver. The driver goes only if no adapter (of any VPN) uses it.
+Future<bool> deleteWintunDriver({void Function(String)? log}) async {
+  final dll = '${appDirectory.path}\\wintun.dll';
+  if (!File(dll).existsSync()) {
+    log?.call('wintun.dll not found, cannot remove the Wintun driver');
+    return false;
+  }
+  try {
+    final result = await Isolate.run(() => _deleteDriverSync(dll)).timeout(const Duration(seconds: 30));
+    log?.call(
+      result != 0
+          ? 'Removed the Wintun driver'
+          : 'The Wintun driver stays (an adapter still uses it, or it is already gone)',
+    );
+    return result != 0;
+  } catch (e) {
+    log?.call('Removing the Wintun driver failed: $e');
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Process helpers
 // ---------------------------------------------------------------------------
 
-Future<ProcessResult> _run(Cmd cmd) =>
-    Process.run(cmd.exe.contains(r'\') ? cmd.exe : '$_system32\\${cmd.exe}.exe', cmd.args);
+/// No single external command may run longer than this (it is killed).
+const _commandTimeout = Duration(seconds: 30);
+
+Future<ProcessResult> _run(Cmd cmd, {Duration timeout = _commandTimeout}) async {
+  final exe = cmd.exe.contains(r'\') ? cmd.exe : '$_system32\\${cmd.exe}.exe';
+  final process = await Process.start(exe, cmd.args);
+  unawaited(process.stdin.close().then<void>((_) {}, onError: (_) {}));
+  final out = systemEncoding.decodeStream(process.stdout);
+  final err = systemEncoding.decodeStream(process.stderr);
+  final int code;
+  try {
+    code = await process.exitCode.timeout(timeout);
+  } on TimeoutException {
+    process.kill();
+    throw TimeoutException('`$cmd` did not finish within ${timeout.inSeconds} s');
+  }
+  return ProcessResult(process.pid, code, await out, await err);
+}
+
+/// Runs an external command (no shell), killing it after [timeout].
+Future<ProcessResult> runCmd(Cmd cmd, {Duration timeout = _commandTimeout}) =>
+    _run(cmd, timeout: timeout);
+
+class NetshResult {
+  const NetshResult(this.exitCode, this.output);
+  final int exitCode;
+  final String output;
+  bool get ok => exitCode == 0;
+}
+
+/// Runs all [cmds] in one netsh session (see [netshScript]). ok only if every
+/// command worked; the output holds Windows' messages for the ones that did not.
+Future<NetshResult> _runNetsh(List<Cmd> cmds, {Duration timeout = _commandTimeout}) async {
+  if (cmds.isEmpty) return const NetshResult(0, '');
+  final script = netshScript(cmds);
+  final process = await Process.start('$_system32\\netsh.exe', const []);
+  unawaited(process.stdin.done.then<void>((_) {}, onError: (_) {}));
+  unawaited(() async {
+    try {
+      process.stdin.write(script);
+      await process.stdin.close();
+    } catch (_) {}
+  }());
+  final out = systemEncoding.decodeStream(process.stdout);
+  final err = systemEncoding.decodeStream(process.stderr);
+  final int code;
+  try {
+    code = await process.exitCode.timeout(timeout);
+  } on TimeoutException {
+    process.kill();
+    throw TimeoutException('netsh did not finish within ${timeout.inSeconds} s');
+  }
+  return NetshResult(code, cleanNetshOutput('${await out}${await err}'));
+}
 
 Future<void> _runChecked(Cmd cmd) async {
   final result = await _run(cmd);
@@ -905,10 +1443,6 @@ Future<bool> _runOk(Cmd cmd, void Function(String)? log) async {
   return false;
 }
 
-Future<void> _runBestEffort(Cmd cmd, void Function(String)? log) async {
-  await _runOk(cmd, log);
-}
-
 /// Deletes a /32 route. A failure only counts if the route is still there.
 Future<bool> _deleteHostRoute(String ip, void Function(String)? log) async {
   try {
@@ -919,6 +1453,32 @@ Future<bool> _deleteHostRoute(String ip, void Function(String)? log) async {
   log?.call('Could not remove the route to $ip');
   return false;
 }
+
+/// Deletes the /32 routes in parallel. Returns the ones that are still there.
+Future<List<String>> _deleteHostRoutes(List<String> ips, void Function(String)? log) async {
+  final removed = await inParallel([for (final ip in ips) () => _deleteHostRoute(ip, log)]);
+  return [
+    for (var i = 0; i < ips.length; i++)
+      if (!removed[i]) ips[i],
+  ];
+}
+
+/// Removes the NRPT rule, the safety-net task and the DNS cache in one
+/// PowerShell launch. True if the rule is gone (the task is only deleted then).
+Future<bool> _removeDns(void Function(String)? log) async {
+  try {
+    final result = await _run(dnsRemoveCmd());
+    if (result.exitCode == 0) return true;
+    log?.call('Could not remove the DNS rule: ${'${result.stdout}${result.stderr}'.trim()}');
+  } catch (e) {
+    log?.call('Could not remove the DNS rule: $e');
+  }
+  return false;
+}
+
+/// Removes our NRPT rule and the DNS safety-net task (same as a normal
+/// disconnect does). For the uninstaller's cleanup. True if the rule is gone.
+Future<bool> removeDnsPolicy({void Function(String)? log}) => _removeDns(log);
 
 Future<DefaultRoute?> _currentDefaultRoute() async =>
     parseDefaultRoute('${(await _run(const Cmd('route', ['print', '-4']))).stdout}');
@@ -933,11 +1493,59 @@ Future<Cmd Function(String)> _bypassCmdFor(DefaultRoute route) async {
   return (ip) => addBypassRouteOnLinkCmd(ip, index);
 }
 
+/// The interface index that has [interfaceIp]. Asks Windows directly (a few
+/// ms); PowerShell is only the fallback (it takes about a second to start).
 Future<int> _interfaceIndexOf(String interfaceIp) async {
+  try {
+    final interfaces = await NetworkInterface.list(includeLoopback: true, includeLinkLocal: true);
+    final index = interfaceIndexForAddress({
+      for (final n in interfaces) n.index: [for (final a in n.addresses) a.address],
+    }, interfaceIp);
+    if (index != null) return index;
+  } catch (_) {}
   final result = await _run(interfaceIndexCmd(interfaceIp));
   final index = parseInterfaceIndex('${result.stdout}');
   if (index == null) throw TunError('Could not find the network adapter that has $interfaceIp.');
   return index;
+}
+
+/// Is the tunnel adapter still listed? (Unknown counts as yes.)
+Future<bool> _tunAdapterPresent() async {
+  try {
+    final interfaces = await NetworkInterface.list(includeLoopback: false, includeLinkLocal: true);
+    return interfaces.any((n) => n.name.toLowerCase() == tunName.toLowerCase());
+  } catch (_) {
+    return true;
+  }
+}
+
+/// How long we wait for Windows to remove the adapter after tun2socks died.
+const tunGoneGrace = Duration(milliseconds: 1500);
+
+/// When tun2socks is dead, Windows removes the adapter and with it its address
+/// and every route on it, so nothing has to be deleted one by one. Waits for
+/// that (up to [grace]); only if the adapter lingers are its routes deleted by
+/// hand, so the internet cannot stay black-holed. True if the adapter vanished.
+Future<bool> _waitForTunAdapterGone(
+  void Function(String)? log, {
+  Duration grace = tunGoneGrace,
+}) async {
+  final timer = Stopwatch()..start();
+  try {
+    while (await _tunAdapterPresent()) {
+      if (timer.elapsed >= grace) {
+        log?.call('The "$tunName" adapter is still there after ${timer.elapsedMilliseconds} ms; deleting its routes');
+        await _runNetsh(tunTeardownCmds());
+        return false;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    }
+    log?.call('The "$tunName" adapter was gone after ${timer.elapsedMilliseconds} ms');
+    return true;
+  } catch (e) {
+    log?.call('Could not check for the "$tunName" adapter: $e');
+    return false;
+  }
 }
 
 /// Adds the /32 route. An identical leftover (crash before the state was
@@ -946,6 +1554,7 @@ Future<void> _addBypass(String ip, Cmd Function(String) cmdFor) async {
   await _runQuiet(deleteBypassRouteCmd(ip));
   await _runChecked(cmdFor(ip));
 }
+
 
 // ---------------------------------------------------------------------------
 // Job object: kills tun2socks automatically if this app dies
@@ -1012,9 +1621,17 @@ void _closeHandle(int handle) {
   } catch (_) {}
 }
 
+
 // ---------------------------------------------------------------------------
 // WindowsTun
 // ---------------------------------------------------------------------------
+
+/// Both routing tables, read at the same time.
+class _Tables {
+  const _Tables(this.v4, this.v6);
+  final List<RouteEntry> v4;
+  final List<RouteEntry> v6;
+}
 
 class WindowsTun {
   WindowsTun._(this._process, this._bypass, this._extra, this._route, this._log, this._job) {
@@ -1036,6 +1653,7 @@ class WindowsTun {
   bool _v6 = false; // the IPv6 setup worked
   int? _tunIndex; // interface index of our adapter
   List<ReservedRoute> _reserved = const [];
+  String? _reservedInterfaceIp; // the real adapter the routes in [_reserved] were added for
   bool _stopRequested = false;
   Future<void>? _stopping;
   Future<void>? _refreshing;
@@ -1050,12 +1668,9 @@ class WindowsTun {
   /// The app's own control-plane requests bind to it so they bypass the tunnel.
   InternetAddress? get physicalAddress => InternetAddress.tryParse(_route.interfaceIp);
 
-  static File get _stateFile {
-    final appData = Platform.environment['APPDATA'] ?? Directory.systemTemp.path;
-    return File('$appData\\FoxyVPN\\tun-state.json');
-  }
+  static File get _stateFile => tunStateFile;
 
-  static Directory get _appDir => File(Platform.resolvedExecutable).parent;
+  static Directory get _appDir => appDirectory;
 
   static Future<WindowsTun> start({
     required int socksPort,
@@ -1074,15 +1689,18 @@ class WindowsTun {
     if (!exe.existsSync() || !File('${_appDir.path}\\wintun.dll').existsSync()) {
       throw TunError(
         'tun2socks.exe or wintun.dll is missing next to foxyvpn.exe. '
-        'Please unzip the whole download and run foxyvpn.exe from that folder.',
+        'Please reinstall FoxyVPN (or unzip the whole download and run foxyvpn.exe from that folder).',
       );
     }
     if (bypass.type != InternetAddressType.IPv4) {
       throw TunError('The VPN server has an IPv6 address, which is not supported yet.');
     }
 
+    // Before the first adapter exists: remember whether the Wintun driver was already here.
+    await recordWintunDriverState(log: log);
     await cleanupStale(log: log);
 
+    final timer = Stopwatch()..start();
     final route = await _currentDefaultRoute();
     if (route == null) throw TunError('No internet connection found. Connect to a network first.');
     log?.call('Default route: ${route.gateway ?? 'on-link'} via ${route.interfaceIp}');
@@ -1091,6 +1709,10 @@ class WindowsTun {
     final extra = selectExtraBypass(extraBypass, exclude: ip);
     WindowsTun? tun;
     var bypassAdded = false;
+    // Background steps that never throw (they return their error), so nothing
+    // can fail unobserved while the main sequence is busy.
+    Future<String?>? dns;
+    Future<void>? extras;
     try {
       final cmdFor = await _bypassCmdFor(route);
       await _addBypass(ip, cmdFor);
@@ -1112,28 +1734,38 @@ class WindowsTun {
       }
       tun = WindowsTun._(process, ip, extra, route, log, job);
       tun._watchOutput();
-      await tun._writeState(process.pid);
-      await tun._addExtraBypass(cmdFor);
-
-      tun._tunIndex = await tun._waitForAdapter();
-      for (final cmd in tunSetupCmds()) {
-        await _runChecked(cmd);
-      }
-      final v6 = await _setupIpv6(log);
-      tun._v6 = v6;
-      if (!v6) log?.call('IPv6 is not available through the tunnel on this PC');
-      await tun._verifyIpv6();
-      await tun._removeOwnMulticastRoutes();
-      await tun._applyReserved(route);
       // Recorded first, so a crash between adding and recording still gets cleaned up.
       tun._nrpt = true;
       await tun._writeState(process.pid);
-      // Safety net for a shutdown or crash; not essential, so failures only get logged.
-      await _runBestEffort(dnsCleanupTaskRegisterCmd(), log);
-      await _runChecked(nrptAddCmd());
+      // Neither needs the adapter, so both run while it comes up (the DNS step is
+      // one PowerShell launch of about a second).
+      dns = tun._setupDns();
+      extras = tun._addExtraBypass(cmdFor);
+
+      tun._tunIndex = await tun._waitForAdapter();
+      final v4 = await _runNetsh(tunSetupCmds());
+      if (!v4.ok) throw TunError('Windows refused a network setting: ${v4.output}');
+      final v6 = await tun._setupIpv6();
+      tun._v6 = v6;
+      if (!v6) log?.call('IPv6 is not available through the tunnel on this PC');
+
+      var tables = await tun._readTables();
+      if (tables != null) {
+        tun._verifyIpv6(tables.v6);
+        if (await tun._removeOwnMulticastRoutes(tables)) tables = await tun._readTables();
+      }
+      await tun._applyReserved(route, tables);
+
+      final dnsError = await dns;
+      if (dnsError != null) throw TunError(dnsError);
+      await extras;
       await _runQuiet(const Cmd('ipconfig', ['/flushdns']));
+      log?.call('Tunnel is up (${timer.elapsedMilliseconds} ms of setup)');
       return tun;
     } catch (e) {
+      // Let the background steps finish first, so the teardown does not race them.
+      if (dns != null) await dns;
+      if (extras != null) await extras;
       if (tun != null) {
         await tun.stop();
       } else if (bypassAdded) {
@@ -1144,47 +1776,74 @@ class WindowsTun {
     }
   }
 
-  /// Runs the IPv6 commands, retrying while the adapter's IPv6 interface is not
-  /// ready yet (right after the adapter appears, netsh can still say "The
-  /// interface is not found"). Every command is tried; true only if all worked.
-  static Future<bool> _setupIpv6(void Function(String)? log) async {
-    final deadline = DateTime.now().add(ipv6SetupRetryWindow);
-    var all = true;
-    for (final cmd in tunSetupCmdsV6()) {
-      final left = deadline.difference(DateTime.now());
-      String? lastFailure;
-      final ok = await retryUntil(
-        () async {
-          try {
-            final result = await _run(cmd);
-            if (result.exitCode == 0) return true;
-            lastFailure = '${result.stdout}${result.stderr}'.trim();
-          } catch (e) {
-            lastFailure = '$e';
-          }
-          return false;
-        },
-        within: left.isNegative ? Duration.zero : left,
-      );
-      if (!ok) log?.call('Skipped (`$cmd`): $lastFailure');
-      all = ok && all;
+  /// The safety-net task and the NRPT rule, in one PowerShell launch. Returns
+  /// the error text, or null when the rule is in place.
+  Future<String?> _setupDns() async {
+    try {
+      final result = await _run(dnsSetupCmd());
+      if (result.exitCode == 0) {
+        final note = '${result.stderr}'.trim();
+        if (note.isNotEmpty) _log?.call('DNS safety net: $note');
+        return null;
+      }
+      return 'Windows refused a network setting (the DNS rule): ${'${result.stdout}${result.stderr}'.trim()}';
+    } catch (e) {
+      return 'Windows refused a network setting (the DNS rule): $e';
     }
-    return all;
+  }
+
+  /// Runs the IPv6 commands as one netsh session, retrying while the adapter's
+  /// IPv6 interface is not ready yet (right after the adapter appears, netsh can
+  /// still say "The interface is not found"). A retry repeats commands that
+  /// already worked, which netsh answers with "exists", so what counts is the
+  /// result: both /1 routes on the adapter. Gives up at once when the PC has no
+  /// IPv6 at all (empty IPv6 routing table); true only if the setup is complete.
+  Future<bool> _setupIpv6() async {
+    final deadline = DateTime.now().add(ipv6SetupRetryWindow);
+    String? lastFailure;
+    while (true) {
+      try {
+        final result = await _runNetsh(tunSetupCmdsV6());
+        if (result.ok) return true;
+        lastFailure = result.output;
+        final table6 = parseRouteTable6(
+          '${(await _run(const Cmd('route', ['print', '-6']))).stdout}',
+          tunIndex: _tunIndex,
+        );
+        if (ipv6TunnelRoutesPresent(table6)) return true;
+        if (table6.isEmpty) break; // IPv6 is switched off: waiting will not help
+      } catch (e) {
+        lastFailure = '$e';
+      }
+      if (!DateTime.now().isBefore(deadline)) break;
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+    }
+    _log?.call('Skipped the IPv6 setup: $lastFailure');
+    return false;
+  }
+
+  /// Both routing tables at once; null (and logged) if they cannot be read.
+  Future<_Tables?> _readTables() async {
+    try {
+      final out = await Future.wait([
+        _run(const Cmd('route', ['print', '-4'])),
+        _run(const Cmd('route', ['print', '-6'])),
+      ]);
+      return _Tables(
+        parseRouteTable4('${out[0].stdout}'),
+        parseRouteTable6('${out[1].stdout}', tunIndex: _tunIndex),
+      );
+    } catch (e) {
+      _log?.call('Could not read the routing table: $e');
+      return null;
+    }
   }
 
   /// Fails the connect, instead of leaking, when the PC has an IPv6 default
   /// route but our two /1 routes did not get in (a half-failed IPv6 setup). With
   /// IPv6 switched off, or no IPv6 default route, nothing can leak and the
   /// best-effort behaviour stays.
-  Future<void> _verifyIpv6() async {
-    final List<RouteEntry> table6;
-    try {
-      final result = await _run(const Cmd('route', ['print', '-6']));
-      table6 = parseRouteTable6('${result.stdout}', tunIndex: _tunIndex);
-    } catch (e) {
-      _log?.call('Could not check the IPv6 routes: $e');
-      return;
-    }
+  void _verifyIpv6(List<RouteEntry> table6) {
     if (!ipv6TunnelMissing(table6)) return;
     throw TunError(
       'This PC has IPv6 internet, but Windows would not route it through the VPN, so '
@@ -1196,22 +1855,20 @@ class WindowsTun {
   /// The tunnel adapter's own 224.0.0.0/4 and ff00::/8 routes (interface metric 1
   /// makes them beat the real adapter's) would send multicast into the tunnel.
   /// Deleted by interface index, only if present; best effort. The real adapter's
-  /// routes are Windows' own and are never touched.
-  Future<void> _removeOwnMulticastRoutes() async {
+  /// routes are Windows' own and are never touched. True if a delete was run
+  /// (the tables are then out of date).
+  Future<bool> _removeOwnMulticastRoutes(_Tables tables) async {
     final index = _tunIndex;
-    if (index == null) return;
+    if (index == null) return false;
+    final cmds = tunMulticastDeleteCmds(tunIndex: index, table4: tables.v4, table6: tables.v6);
+    if (cmds.isEmpty) return false;
     try {
-      final table4 = parseRouteTable4('${(await _run(const Cmd('route', ['print', '-4']))).stdout}');
-      final table6 = parseRouteTable6(
-        '${(await _run(const Cmd('route', ['print', '-6']))).stdout}',
-        tunIndex: index,
-      );
-      for (final cmd in tunMulticastDeleteCmds(tunIndex: index, table4: table4, table6: table6)) {
-        await _runBestEffort(cmd, _log);
-      }
+      final result = await _runNetsh(cmds);
+      if (!result.ok) _log?.call('Could not remove the tunnel adapter\'s multicast routes: ${result.output}');
     } catch (e) {
       _log?.call('Could not remove the tunnel adapter\'s multicast routes: $e');
     }
+    return true;
   }
 
   Future<void> _writeState(int tunPid) async {
@@ -1232,47 +1889,46 @@ class WindowsTun {
     );
   }
 
-  /// Best effort: the control-plane IPs only add safety on top of the source binding.
+  /// Best effort: the control-plane IPs only add safety on top of the source
+  /// binding. Added in parallel; never throws.
   Future<void> _addExtraBypass(Cmd Function(String) cmdFor) async {
-    for (final ip in _extra) {
-      try {
-        await _addBypass(ip, cmdFor);
-      } catch (e) {
-        _log?.call('Skipped the bypass route for $ip: $e');
-      }
-    }
+    await inParallel([
+      for (final ip in _extra)
+        () async {
+          try {
+            await _addBypass(ip, cmdFor);
+          } catch (e) {
+            _log?.call('Skipped the bypass route for $ip: $e');
+          }
+        },
+    ]);
   }
 
   /// Routes the local and private ranges out of the real adapter (best effort:
-  /// problems are logged and the VPN works without them). The plan is written
-  /// to the state file before the routes are added, so a crash is cleaned up.
-  Future<void> _applyReserved(DefaultRoute route) async {
+  /// problems are logged and the VPN works without them). The whole plan is
+  /// written to the state file before the routes are added (one netsh session),
+  /// so a crash is cleaned up. [known] are routing tables that are still current.
+  Future<void> _applyReserved(DefaultRoute route, [_Tables? known]) async {
     try {
-      final table4 = parseRouteTable4('${(await _run(const Cmd('route', ['print', '-4']))).stdout}');
+      final tables = known ?? await _readTables();
+      if (tables == null) return;
+      final table4 = tables.v4;
       final needed = reservedRoutesNeeded(reservedPrefixesV4, table4);
       final indexV4 = await _interfaceIndexOf(route.interfaceIp);
       int? indexV6;
       String? gatewayV6;
       var neededV6 = <String>[];
       var table6 = const <RouteEntry>[];
-      if (_v6) {
-        final interfaces =
-            '${(await _run(const Cmd('netsh', ['interface', 'ipv4', 'show', 'interfaces']))).stdout}';
-        final tunIndex = findInterface(parseInterfaces(interfaces), tunName);
-        if (tunIndex != null) {
-          table6 = parseRouteTable6(
-            '${(await _run(const Cmd('route', ['print', '-6']))).stdout}',
-            tunIndex: tunIndex,
-          );
-          neededV6 = reservedRoutesNeeded(reservedPrefixesV6, table6);
-          final defaults = [
-            for (final e in table6)
-              if (e.prefix.length == 0 && !e.viaTun) e,
-          ]..sort((a, b) => a.metric.compareTo(b.metric));
-          // The real adapter's IPv6 router, else the IPv4 adapter (same NIC).
-          indexV6 = defaults.isEmpty ? indexV4 : defaults.first.interfaceIndex;
-          gatewayV6 = defaults.isEmpty ? null : defaults.first.gateway;
-        }
+      if (_v6 && _tunIndex != null) {
+        table6 = tables.v6;
+        neededV6 = reservedRoutesNeeded(reservedPrefixesV6, table6);
+        final defaults = [
+          for (final e in table6)
+            if (e.prefix.length == 0 && !e.viaTun) e,
+        ]..sort((a, b) => a.metric.compareTo(b.metric));
+        // The real adapter's IPv6 router, else the IPv4 adapter (same NIC).
+        indexV6 = defaults.isEmpty ? indexV4 : defaults.first.interfaceIndex;
+        gatewayV6 = defaults.isEmpty ? null : defaults.first.gateway;
       }
       final plan = withoutExistingRoutes(
         planReservedRoutes(
@@ -1287,16 +1943,32 @@ class WindowsTun {
         table6: table6,
       );
       if (plan.isEmpty) return;
-      // Only routes we really added are ours to delete later: a failed add may
-      // mean an identical system route exists, and that one must survive.
-      // Each route is recorded before it is added, so a crash is cleaned up.
-      final added = <ReservedRoute>[];
-      for (final r in plan) {
-        _reserved = [...added, r];
-        await _writeState(_process.pid);
-        if (await _runOk(addReservedRouteCmd(r), _log)) added.add(r);
+      // Routes a failed delete left behind (see [_removeReserved]) stay recorded.
+      final kept = _reserved;
+      _reservedInterfaceIp = kept.isEmpty ? route.interfaceIp : null;
+      _reserved = [...kept, ...plan];
+      await _writeState(_process.pid);
+      final result = await _runNetsh([for (final r in plan) addReservedRouteCmd(r)]);
+      var added = plan;
+      if (!result.ok) {
+        // Only routes we really added are ours to delete later: a refused add may
+        // mean an identical system route exists, and that one must survive.
+        _log?.call('Some local-range routes were refused: ${result.output}');
+        final after = await _readTables();
+        if (after != null) {
+          added = [
+            for (final r in plan)
+              if (withoutExistingRoutes(
+                [r],
+                table4: after.v4,
+                interfaceIpV4: route.interfaceIp,
+                table6: after.v6,
+              ).isEmpty)
+                r,
+          ];
+        }
       }
-      _reserved = added;
+      _reserved = [...kept, ...added];
       await _writeState(_process.pid);
       if (added.isEmpty) return;
       _log?.call('Local and private ranges bypass the tunnel: ${added.map((r) => r.prefix).join(', ')}');
@@ -1305,12 +1977,33 @@ class WindowsTun {
     }
   }
 
-  Future<void> _removeReserved() async {
+  /// Deletes the local-range routes. A failed delete only counts if the route is
+  /// still in the routing table; those stay in [_reserved] (so the state file keeps
+  /// them for a retry) and are returned.
+  Future<List<ReservedRoute>> _removeReserved() async {
     final old = _reserved;
     _reserved = const [];
-    for (final r in old) {
-      await _runQuiet(deleteReservedRouteCmd(r));
+    if (old.isEmpty) return const [];
+    var left = old; // if we cannot tell, assume they are still there
+    try {
+      final result = await _runNetsh([for (final r in old) deleteReservedRouteCmd(r)]);
+      if (result.ok) return const [];
+      _log?.call('Some local-range routes could not be removed: ${result.output}');
+    } catch (e) {
+      _log?.call('Could not remove the local-range routes: $e');
     }
+    final tables = await _readTables();
+    if (tables != null) {
+      left = reservedRoutesStillPresent(
+        old,
+        table4: tables.v4,
+        table6: tables.v6,
+        interfaceIpV4: _reservedInterfaceIp,
+      );
+    }
+    if (left.isNotEmpty) _log?.call('Still routed, kept for the next cleanup: ${left.join(', ')}');
+    _reserved = left;
+    return left;
   }
 
   /// Call after the real network may have changed (before reconnecting): if the
@@ -1373,7 +2066,7 @@ class WindowsTun {
           '${(await _run(const Cmd('netsh', ['interface', 'ipv4', 'show', 'interfaces']))).stdout}';
       final index = findInterface(parseInterfaces(out), tunName);
       if (index != null) return index;
-      await Future<void>.delayed(const Duration(milliseconds: 300));
+      await Future<void>.delayed(const Duration(milliseconds: 100));
     }
     throw TunError(
       'Windows did not create the "$tunName" network adapter. '
@@ -1387,46 +2080,65 @@ class WindowsTun {
     return _stopping ??= _stop();
   }
 
+  /// Teardown, fastest order:
+  ///  1. wait for an in-flight refresh (it must not re-add a route afterwards),
+  ///  2. kill tun2socks first: Windows then removes the Wintun adapter and with
+  ///     it its address and all routes on it (the /1 routes, the IPv6 ones), so
+  ///     those are not deleted one by one,
+  ///  3. at the same time: delete the routes we put on the real adapter (in
+  ///     parallel), remove the DNS rule + task + cache in ONE PowerShell launch,
+  ///     and wait until the tunnel adapter is really gone (if it lingers, its
+  ///     routes are deleted by hand).
+  /// The state file stays if anything could not be removed, for the next start.
   Future<void> _stop() async {
-    // A refresh in flight must not re-add a route after we removed it.
+    final timer = Stopwatch()..start();
     try {
       await _refreshing;
     } catch (_) {}
-    for (final cmd in tunTeardownCmds()) {
-      await _runQuiet(cmd);
-    }
-    await _removeReserved();
-    final routesLeft = <String>[];
-    for (final ip in [_bypass, ..._extra]) {
-      if (!await _deleteHostRoute(ip, _log)) routesLeft.add(ip);
-    }
-    var nrptLeft = false;
-    if (_nrpt) {
-      // The scheduled task stays as the fallback if the rule could not be removed.
-      if (await _runOk(nrptRemoveCmd(), _log)) {
-        await _runQuiet(dnsCleanupTaskDeleteCmd());
-      } else {
-        nrptLeft = true;
-      }
-    }
     _process.kill();
     await _exited.future.timeout(const Duration(seconds: 5), onTimeout: () {});
     if (_job != null) _closeHandle(_job);
-    if (routesLeft.isEmpty && !nrptLeft) {
+    final killed = timer.elapsedMilliseconds;
+
+    final routesLeft = <String>[];
+    var reservedLeft = const <ReservedRoute>[];
+    var nrptLeft = false;
+    var adapterLeft = false;
+    try {
+      await Future.wait([
+        () async {
+          routesLeft.addAll(await _deleteHostRoutes([_bypass, ..._extra], _log));
+        }(),
+        () async {
+          reservedLeft = await _removeReserved();
+        }(),
+        () async {
+          if (_nrpt) nrptLeft = !await _removeDns(_log);
+        }(),
+        () async {
+          adapterLeft = !await _waitForTunAdapterGone(_log);
+        }(),
+      ]);
+    } catch (e) {
+      _log?.call('Teardown error: $e');
+      nrptLeft = nrptLeft || _nrpt;
+    }
+    if (routesLeft.isEmpty && reservedLeft.isEmpty && !nrptLeft && !adapterLeft) {
       _deleteState();
     } else {
       // Kept (without an owner), so cleanupStale retries at the next start.
-      await _keepLeftovers(routesLeft, nrptLeft);
+      await _keepLeftovers(routesLeft, nrptLeft, reservedLeft);
     }
-    await _runQuiet(const Cmd('ipconfig', ['/flushdns']));
+    _log?.call('Teardown took ${timer.elapsedMilliseconds} ms (tun2socks was stopped after $killed ms)');
   }
 
-  Future<void> _keepLeftovers(List<String> routes, bool nrpt) async {
+  Future<void> _keepLeftovers(List<String> routes, bool nrpt, List<ReservedRoute> reserved) async {
     try {
       await _stateFile.writeAsString(
         jsonEncode({
           'bypass': routes.contains(_bypass) ? _bypass : null,
           'extraBypass': routes.where((r) => r != _bypass).toList(),
+          'reserved': [for (final r in reserved) r.toJson()],
           'nrpt': nrpt,
           'dnsTask': nrpt,
         }),
@@ -1456,28 +2168,43 @@ class WindowsTun {
       );
       if (live) return;
       log?.call('Cleaning up after an earlier crash');
+      final timer = Stopwatch()..start();
       final tunPid = state.tun2socks;
       if (tunPid != null) {
         await _runQuiet(
           Cmd('taskkill', ['/F', '/PID', '$tunPid', '/FI', 'IMAGENAME eq tun2socks.exe']),
         );
       }
-      var routesLeft = 0;
-      for (final ip in [if (state.bypass != null) state.bypass!, ...state.extraBypass]) {
-        if (!await _deleteHostRoute(ip, log)) routesLeft++;
+      var routesLeft = const <String>[];
+      var nrptOk = false;
+      await Future.wait([
+        () async {
+          routesLeft = await _deleteHostRoutes([
+            if (state.bypass != null) state.bypass!,
+            ...state.extraBypass,
+          ], log);
+        }(),
+        () async {
+          try {
+            await _runNetsh([
+              ...tunTeardownCmds(),
+              for (final route in state.reserved) deleteReservedRouteCmd(route),
+            ]);
+          } catch (_) {}
+        }(),
+        // Always: the rule is found by its comment, so this is harmless if there is none.
+        () async {
+          nrptOk = await _removeDns(log);
+        }(),
+      ]);
+      // A dead tun2socks normally takes its adapter with it; if one lingers, remove it.
+      var adapterOk = true;
+      if (!await _waitForTunAdapterGone(log, grace: const Duration(seconds: 1))) {
+        adapterOk = await removeWintunAdapter(log: log);
       }
-      for (final cmd in tunTeardownCmds()) {
-        await _runQuiet(cmd);
-      }
-      for (final route in state.reserved) {
-        await _runQuiet(deleteReservedRouteCmd(route));
-      }
-      // Always: the rule is found by its comment, so this is harmless if there is none.
-      final nrptOk = await _runOk(nrptRemoveCmd(), log);
-      if (nrptOk) await _runQuiet(dnsCleanupTaskDeleteCmd());
-      await _runQuiet(const Cmd('ipconfig', ['/flushdns']));
-      if (routesLeft == 0 && (nrptOk || !state.nrpt)) {
+      if (routesLeft.isEmpty && (nrptOk || !state.nrpt) && adapterOk) {
         file.deleteSync();
+        log?.call('Cleanup took ${timer.elapsedMilliseconds} ms');
       } else {
         log?.call('Cleanup is incomplete; trying again at the next start');
       }

@@ -1,0 +1,19 @@
+gradle-wrapper.jar
+/.gradle
+/captures/
+/gradlew
+/gradlew.bat
+/local.properties
+GeneratedPluginRegistrant.java
+.cxx/
+/app/.cxx/
+
+# Release signing: never commit the keystore or its passwords.
+# android/key.properties points at a keystore that lives outside the repo
+# (see android/app/build.gradle.kts).
+key.properties
+**/*.keystore
+**/*.jks
+
+# Kotlin compiler daemon state
+.kotlin/

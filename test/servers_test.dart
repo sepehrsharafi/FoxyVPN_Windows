@@ -2,6 +2,11 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:foxyvpn/servers.dart';
 
 void main() {
+  test('the user agent names the platform the app runs on', () {
+    expect(mozillaVpnUserAgentFor(android: false), 'MozillaVPN/2.35.0 (sys:windows; iap:true)');
+    expect(mozillaVpnUserAgentFor(android: true), 'MozillaVPN/2.35.0 (sys:android; iap:true)');
+  });
+
   test('parses locations, skipping quarantined servers and excluded countries', () {
     const raw = '''
 {"data": [

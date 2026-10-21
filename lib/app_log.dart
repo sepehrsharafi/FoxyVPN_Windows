@@ -1,10 +1,14 @@
-// Append-only diagnostic log at %APPDATA%\FoxyVPN\log.txt.
+// Append-only diagnostic log at %APPDATA%\FoxyVPN\log.txt (Android: log.txt in
+// the app's private files directory, shown by the in-app log page).
 //
 // Size-capped (the old file is kept once as log.old.txt). Secrets are scrubbed
 // before anything is written, and callers must not log tokens or passwords in
 // the first place.
 
 import 'dart:io';
+
+import 'platform/android_platform.dart';
+import 'platform/host.dart';
 
 class AppLog {
   AppLog._();
@@ -17,6 +21,7 @@ class AppLog {
   static File get file {
     final override = fileOverride;
     if (override != null) return override;
+    if (Host.isAndroid) return File('${AndroidPlatform.filesDir}/log.txt');
     final appData = Platform.environment['APPDATA'] ?? Directory.systemTemp.path;
     return File('$appData\\FoxyVPN\\log.txt');
   }
@@ -35,8 +40,26 @@ class AppLog {
     } catch (_) {}
   }
 
+  /// The end of the log (the last [maxChars] characters, from a whole line), as
+  /// text for the in-app log page. Empty if there is no log yet. Never throws.
+  static Future<String> readTail({int maxChars = 60000}) async {
+    try {
+      final f = file;
+      if (!f.existsSync()) return '';
+      final text = await f.readAsString();
+      if (text.length <= maxChars) return text;
+      final tail = text.substring(text.length - maxChars);
+      final newline = tail.indexOf('\n');
+      return newline < 0 ? tail : tail.substring(newline + 1);
+    } catch (_) {
+      return '';
+    }
+  }
+
   /// Opens the log in Notepad (it may not exist yet, so create it first).
+  /// Android has an in-app log page instead (see ui/screens/log_screen.dart).
   static Future<void> open() async {
+    if (Host.isAndroid) return;
     try {
       final f = file;
       f.parent.createSync(recursive: true);

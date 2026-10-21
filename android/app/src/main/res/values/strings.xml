@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">FoxyVPN</string>
+    <string name="notification_channel_name">VPN status</string>
+    <string name="notification_channel_description">Shown while FoxyVPN is protecting this device.</string>
+    <string name="notification_disconnect">Disconnect</string>
+    <string name="notification_connecting">Connecting…</string>
+    <string name="notification_protected">Protected</string>
+    <string name="tile_tap_for_fastest">Tap for fastest</string>
+    <string name="tile_sign_in_first">Sign in first</string>
+    <string name="tile_disconnecting">Disconnecting…</string>
+</resources>

@@ -1,7 +1,10 @@
+import 'dart:async';
 import 'dart:ui' show PointerDeviceKind;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
+import '../platform/host.dart';
 import '../vpn_controller.dart';
 import 'screens/home_screen.dart';
 import 'screens/sign_in_screen.dart';
@@ -38,15 +41,77 @@ class FoxyApp extends StatelessWidget {
           data: media.copyWith(textScaler: media.textScaler.clamp(maxScaleFactor: maxTextScale)),
           child: ColoredBox(
             color: FoxyColors.bg,
-            child: Column(
-              children: [
-                const TitleBar(),
-                Expanded(child: ClipRect(child: child ?? const SizedBox.shrink())),
-              ],
-            ),
+            child: Host.isAndroid
+                // Phones: no title bar. Edge to edge, content kept clear of the
+                // status bar, the navigation bar / gesture area and the cutout.
+                ? AndroidFrame(child: child ?? const SizedBox.shrink())
+                : Column(
+                    children: [
+                      const TitleBar(),
+                      Expanded(child: ClipRect(child: child ?? const SizedBox.shrink())),
+                    ],
+                  ),
           ),
         );
       },
+    );
+  }
+}
+
+/// The phone frame around every page: edge-to-edge with dark system bars, safe
+/// insets, and a readable column on wide screens (tablets, foldables).
+class AndroidFrame extends StatefulWidget {
+  const AndroidFrame({super.key, required this.child});
+
+  final Widget child;
+
+  /// The widest the content gets; the 400 px design stays centred on larger screens.
+  static const maxContentWidth = 480.0;
+
+  @override
+  State<AndroidFrame> createState() => _AndroidFrameState();
+}
+
+class _AndroidFrameState extends State<AndroidFrame> {
+  static const _overlay = SystemUiOverlayStyle(
+    statusBarColor: Colors.transparent,
+    statusBarIconBrightness: Brightness.light,
+    statusBarBrightness: Brightness.dark,
+    systemNavigationBarColor: FoxyColors.bg,
+    systemNavigationBarDividerColor: FoxyColors.bg,
+    systemNavigationBarIconBrightness: Brightness.light,
+    systemNavigationBarContrastEnforced: false,
+  );
+
+  @override
+  void initState() {
+    super.initState();
+    // Best effort: the engine may have no Activity attached yet (it also runs
+    // headless when Android starts the VPN by itself).
+    unawaited(
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge).catchError((Object _) {}),
+    );
+    unawaited(
+      SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]).catchError((Object _) {}),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: _overlay,
+      // Left and right insets too (a notch in landscape), top for the status bar,
+      // bottom for the gesture / navigation bar; the keyboard is handled by each
+      // Scaffold (it resizes for the keyboard).
+      child: SafeArea(
+        child: Align(
+          alignment: Alignment.topCenter,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: AndroidFrame.maxContentWidth),
+            child: ClipRect(child: widget.child),
+          ),
+        ),
+      ),
     );
   }
 }

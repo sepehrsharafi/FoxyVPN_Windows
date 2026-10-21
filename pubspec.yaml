@@ -32,6 +32,8 @@ flutter:
 
   assets:
     - assets/fonts/urbanist/OFL.txt
+    # Licenses of the native code in the Android build (hev-socks5-tunnel & co).
+    - assets/licenses/android-native.txt
 
   # Urbanist (SIL OFL 1.1, https://github.com/coreyhu/Urbanist). Static cuts only:
   # nothing below Medium is used anywhere in the app.

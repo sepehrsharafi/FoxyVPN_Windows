@@ -17,6 +17,9 @@ import 'app_log.dart';
 import 'errors.dart';
 import 'fxa.dart' show LoginDone, LoginNeedsCode, LoginStep;
 import 'http_util.dart' show ControlPlane;
+import 'platform/android_bridge.dart';
+import 'platform/host.dart';
+import 'platform/tun_backend.dart';
 import 'servers.dart';
 import 'settings_store.dart';
 import 'tunnel/conflicts.dart';
@@ -37,6 +40,7 @@ typedef SessionStarter =
       bool directFallback,
     });
 
+/// The Windows tunnel starter (kept as it was; see [VpnController.startTun]).
 typedef TunStarter =
     Future<WindowsTun> Function({
       required int socksPort,
@@ -57,6 +61,12 @@ String locationKey(Location l) => '${l.countryCode}|${l.cityCode}';
 class VpnController extends ChangeNotifier {
   /// [cleanup], [loadLocations], [ping] and [detectConflicts] only exist so
   /// tests can replace the parts that touch Windows or the network.
+  ///
+  /// The tunnel layer differs per platform (see lib/platform/tun_backend.dart).
+  /// By default the controller uses the one of the platform it runs on.
+  /// [startTun] (the Windows tunnel) and [startBackend] (any [TunBackend]) replace
+  /// it in tests; [prepareTun] replaces the permission step that Android needs
+  /// before a connection ([platformPrepare]); [androidBridge] the service events.
   VpnController({
     Account? account,
     SettingsStore? settings,
@@ -66,8 +76,13 @@ class VpnController extends ChangeNotifier {
     Future<List<String>> Function()? detectConflicts,
     SessionStarter? startSession,
     TunStarter? startTun,
+    TunBackendStarter? startBackend,
+    Future<void> Function()? prepareTun,
+    AndroidBridge? androidBridge,
     this.cancelWait = connectCancelWait,
     this.exitCheckDelay = const Duration(seconds: 2),
+    this.quickConnectTimeout = const Duration(seconds: 6),
+    this.locationsMaxAge = const Duration(minutes: 2),
     this.statsInterval = const Duration(seconds: 1),
     DateTime Function()? clock,
   })  : _clock = clock ?? DateTime.now,
@@ -78,15 +93,31 @@ class VpnController extends ChangeNotifier {
         _ping = ping ?? pingMs,
         _detectConflicts = detectConflicts ?? ConflictDetector.detect,
         _startSession = startSession ?? VpnSession.start,
-        _startTun = startTun ?? WindowsTun.start {
+        _startTun = startBackend ?? _wrapWindows(startTun) ?? startPlatformTun,
+        _prepareTun = prepareTun ?? (startBackend != null || startTun != null ? null : platformPrepare),
+        _android = androidBridge ?? (Host.isAndroid ? AndroidBridge.instance : null) {
     _signedIn = _account.hasSavedSignIn;
     _selectedKey = _settings.selectedLocation;
   }
 
+  static TunBackendStarter? _wrapWindows(TunStarter? start) {
+    if (start == null) return null;
+    return ({
+      required int socksPort,
+      required InternetAddress bypass,
+      List<InternetAddress> extraBypass = const [],
+      String? label,
+      void Function(String)? log,
+    }) async => WindowsTunBackend(
+      await start(socksPort: socksPort, bypass: bypass, extraBypass: extraBypass, log: log),
+    );
+  }
+
   /// Undoes routes and DNS rules left behind by an earlier crash (does nothing
-  /// normally). Connect stays disabled until it is done.
+  /// normally). Connect stays disabled until it is done. (Android has none:
+  /// there are no routes or DNS rules of ours outside the VPN service.)
   static Future<void> _defaultCleanup() =>
-      Platform.isWindows ? WindowsTun.cleanupStale(log: AppLog.write) : Future<void>.value();
+      Host.isWindows ? WindowsTun.cleanupStale(log: AppLog.write) : Future<void>.value();
 
   final Account _account;
   final SettingsStore _settings;
@@ -95,13 +126,27 @@ class VpnController extends ChangeNotifier {
   final Future<int?> Function(ServerNode node) _ping;
   final Future<List<String>> Function() _detectConflicts;
   final SessionStarter _startSession;
-  final TunStarter _startTun;
+  final TunBackendStarter _startTun;
+  final Future<void> Function()? _prepareTun; // before a connection (Android: VPN permission)
+  final AndroidBridge? _android;
+  StreamSubscription<AndroidVpnEvent>? _androidSub;
+  bool _autoStarting = false;
+  bool _quickConnecting = false; // a quick connect is pinging or connecting
+  int _quickEpoch = 0; // bumped to cancel a quick connect that has not connected yet
+  String? _tileSignature; // what the Android tile was last told
   /// How long a disconnect waits for a connect still reaching the server.
   final Duration cancelWait;
 
   /// How long after reaching "connected" (or after a reconnect) the exit IP is
   /// looked up.
   final Duration exitCheckDelay;
+
+  /// Quick connect (the Android tile): the most it waits for fresh locations
+  /// and pings before it picks from what it has.
+  final Duration quickConnectTimeout;
+
+  /// Quick connect measures again if the pings are older than this.
+  final Duration locationsMaxAge;
 
   /// Tick of the live stats (speed sampling and UI refresh).
   final Duration statsInterval;
@@ -127,6 +172,8 @@ class VpnController extends ChangeNotifier {
   bool _loadingLocations = false;
   String? _locationsError;
   Future<void>? _loadFuture;
+  Future<void>? _pingFuture; // the pings of the current list
+  DateTime? _locationsAt; // when the current list was loaded (and pinged)
   int _generation = 0; // invalidates pings of an older list
   String? _selectedKey;
   Location? _selected;
@@ -134,7 +181,8 @@ class VpnController extends ChangeNotifier {
   // --- connection ------------------------------------------------------------
   bool _cleaning = true; // startup cleanup still running
   VpnSession? _session;
-  WindowsTun? _tun;
+  TunBackend? _tun;
+  Location? _connectedLocation; // what the tunnel was started for (the notification text)
   bool _connecting = false;
   Future<void>? _connectFuture; // the connect in flight, so exit/disconnect can wait for it
   bool _tunStarting = false; // WindowsTun.start is running: it must be awaited, never abandoned
@@ -167,12 +215,132 @@ class VpnController extends ChangeNotifier {
       _cleaning = false;
       _notify();
     });
+    _listenToAndroid();
+    _syncTile();
     await Future.wait([cleanup, _load(), _checkAccount(), refreshConflicts()]);
+    // Android may have started the VPN service itself (Always-on VPN) while the
+    // app was not running; connect now that the account and locations are loaded.
+    final android = _android;
+    if (android != null && !_disposed) {
+      try {
+        if (await android.takeAutoStart()) unawaited(_connectForAndroid());
+      } catch (e) {
+        AppLog.write('Always-on check failed: $e');
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Android: events of the VPN service
+  // ---------------------------------------------------------------------------
+
+  void _listenToAndroid() {
+    final android = _android;
+    if (android == null || _androidSub != null) return;
+    _androidSub = android.events.listen((event) {
+      if (_disposed) return;
+      switch (event.type) {
+        // The Disconnect button of the notification: the session lives here, so
+        // it is asked to disconnect (which stops the service).
+        // (Also the tile, while it is on. A quick connect that is still pinging has
+        // no session to disconnect yet, so it is cancelled.)
+        case 'disconnectRequested':
+          _quickEpoch++;
+          unawaited(disconnect().catchError((Object _) {}));
+        // The Quick Settings tile: connect to the fastest location.
+        case 'quickConnect':
+          unawaited(_quickConnectForAndroid());
+        // Android started the service (Always-on VPN) and wants the VPN up.
+        case 'autoStart':
+          unawaited(_connectForAndroid());
+      }
+    });
+  }
+
+  /// Connects because Android asked for it. If that does not work out (signed
+  /// out, no location, an error) the service is told to end, so no empty
+  /// "connecting" notification lingers.
+  Future<void> _connectForAndroid() async {
+    final android = _android;
+    // Android reports an Always-on start both as an event and through takeAutoStart().
+    if (android == null || _autoStarting) return;
+    _autoStarting = true;
+    try {
+      await init();
+      if (_signedIn && state == ConnState.idle) {
+        await connect();
+      }
+    } catch (e) {
+      AppLog.write('Always-on connect failed: $e');
+    } finally {
+      _autoStarting = false;
+    }
+    if (_disposed) return;
+    final s = state;
+    if (s != ConnState.connected && s != ConnState.connecting && s != ConnState.reconnecting) {
+      try {
+        await android.stop();
+      } catch (_) {}
+    }
+  }
+
+  /// Connects to the fastest location because the Android tile asked for it. If
+  /// that does not work out (signed out, no location, an error, cancelled) the
+  /// service is told to end, so no empty "connecting" notification lingers.
+  Future<void> _quickConnectForAndroid() async {
+    final android = _android;
+    if (android == null || _quickConnecting) return;
+    try {
+      await quickConnectFastest();
+    } catch (e) {
+      AppLog.write('Quick connect failed: $e');
+    }
+    if (_disposed) return;
+    final s = state;
+    if (s != ConnState.connected && s != ConnState.connecting && s != ConnState.reconnecting) {
+      try {
+        await android.stop();
+      } catch (_) {}
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Android: the Quick Settings tile shows what is going on
+  // ---------------------------------------------------------------------------
+
+  /// Tells Kotlin what the tile should show (only when it changed): signed in or
+  /// not, and off / connecting / connected / disconnecting with the text under it.
+  void _syncTile() {
+    final android = _android;
+    if (android == null || _disposed) return;
+    String? phase;
+    String? label;
+    switch (state) {
+      case ConnState.preparing:
+        phase = _quickConnecting ? 'connecting' : null; // not known yet
+      case ConnState.idle:
+        phase = _quickConnecting ? 'connecting' : 'off';
+      case ConnState.connecting:
+        phase = 'connecting';
+      case ConnState.reconnecting:
+        phase = 'connecting';
+        label = 'Reconnecting…';
+      case ConnState.connected:
+        phase = 'connected';
+        label = _statusLabel(_connectedLocation);
+      case ConnState.disconnecting:
+        phase = 'disconnecting';
+    }
+    final signature = '$_signedIn|$phase|$label';
+    if (signature == _tileSignature) return;
+    _tileSignature = signature;
+    unawaited(android.setTileState(signedIn: _signedIn, phase: phase, label: label).catchError((Object _) {}));
   }
 
   @override
   void dispose() {
     _disposed = true;
+    _androidSub?.cancel();
     _statsTimer?.cancel();
     _exitTimer?.cancel();
     _exitGeneration++;
@@ -181,7 +349,9 @@ class VpnController extends ChangeNotifier {
   }
 
   void _notify() {
-    if (!_disposed) notifyListeners();
+    if (_disposed) return;
+    notifyListeners();
+    _syncTile();
   }
 
   /// For window close: lets an in-flight connect finish (it tears itself down),
@@ -380,9 +550,12 @@ class VpnController extends ChangeNotifier {
       _pinging.clear();
       _sortedCache = null;
       _loadingLocations = false;
+      _locationsAt = _clock();
       _resolveSelected();
       _notify();
-      unawaited(_pingAll());
+      final pings = _pingAll();
+      _pingFuture = pings;
+      unawaited(pings);
     } catch (e) {
       AppLog.write('Loading locations failed: $e');
       _locationsError = 'Could not load locations. ${friendlyError(e)}';
@@ -523,6 +696,7 @@ class VpnController extends ChangeNotifier {
       if (info.ip != _exitIp || info.countryCode != _exitCountryCode) {
         _exitIp = info.ip;
         _exitCountryCode = info.countryCode;
+        _tun?.setStatus(_statusLabel(_connectedLocation));
         _notify();
       }
     } catch (e) {
@@ -558,6 +732,82 @@ class VpnController extends ChangeNotifier {
     };
   }
 
+  /// The Android tile: ping every location (again if the pings are older than
+  /// [locationsMaxAge], waiting at most [quickConnectTimeout]), pick the one with
+  /// the lowest ping and connect to it. Recommended is only the fallback if no
+  /// other location answered, then the last selected one. The choice is saved like
+  /// any selection. Does nothing when signed out or when not idle (already
+  /// connected, connecting or disconnecting). A `disconnectRequested` while it is
+  /// still pinging cancels it.
+  Future<void> quickConnectFastest() async {
+    if (_quickConnecting || _disposed || _shuttingDown) return;
+    _quickConnecting = true;
+    final epoch = _quickEpoch;
+    bool abandoned() => _disposed || _shuttingDown || epoch != _quickEpoch || !_signedIn || state != ConnState.idle;
+    try {
+      await init();
+      if (!_signedIn) {
+        AppLog.write('Quick connect: not signed in');
+        return;
+      }
+      if (state != ConnState.idle) return;
+      _notify(); // the tile reads "connecting" while the pings run
+      await _awaitFreshPings();
+      if (abandoned()) return;
+      final target = _fastestLocation();
+      if (target == null) {
+        AppLog.write('Quick connect: no location to connect to');
+        return;
+      }
+      AppLog.write('Quick connect: ${target.label} (${pingOf(target) ?? 'no ping'} ms)');
+      await select(target);
+      if (abandoned()) return;
+      await connect();
+    } finally {
+      _quickConnecting = false;
+      _notify();
+    }
+  }
+
+  /// Makes sure the pings are recent: loads and pings again if the list is empty
+  /// or older than [locationsMaxAge], otherwise waits for pings still running.
+  Future<void> _awaitFreshPings() async {
+    Future<void> run() async {
+      final at = _locationsAt;
+      final stale = _locations.isEmpty || at == null || _clock().difference(at) > locationsMaxAge;
+      if (stale) await refreshLocations();
+      await _pingFuture;
+    }
+
+    try {
+      await run().timeout(quickConnectTimeout);
+    } on TimeoutException {
+      AppLog.write('Quick connect: pings are slow; using what answered');
+    } catch (e) {
+      AppLog.write('Quick connect: measuring failed: $e');
+    }
+  }
+
+  /// Lowest ping among the real locations; else Recommended; else the selected one.
+  Location? _fastestLocation() {
+    Location? best;
+    int? bestMs;
+    for (final l in _locations) {
+      if (l.isRecommended) continue;
+      final ms = _pings[l];
+      if (ms == null) continue;
+      if (bestMs == null || ms < bestMs) {
+        best = l;
+        bestMs = ms;
+      }
+    }
+    if (best != null) return best;
+    for (final l in _locations) {
+      if (l.isRecommended) return l;
+    }
+    return _selected;
+  }
+
   Future<void> connect() {
     final location = _selected;
     if (location == null || state != ConnState.idle || _shuttingDown) return Future.value();
@@ -569,7 +819,7 @@ class VpnController extends ChangeNotifier {
   }
 
   /// True (after tearing down what it started) if a disconnect came in meanwhile.
-  Future<bool> _abortIfCancelled(WindowsTun? tun, VpnSession? session) async {
+  Future<bool> _abortIfCancelled(TunBackend? tun, VpnSession? session) async {
     if (!_cancelConnect) return false;
     AppLog.write('Connect cancelled');
     await _stopQuietly(tun, session);
@@ -587,13 +837,21 @@ class VpnController extends ChangeNotifier {
     _notify();
     unawaited(refreshConflicts());
     VpnSession? session;
-    WindowsTun? tun;
+    TunBackend? tun;
     try {
+      // Android: the VPN permission dialog comes first, before any session or
+      // quota is used (nothing to do on Windows).
+      final prepare = _prepareTun;
+      if (prepare != null) {
+        await prepare();
+        if (await _abortIfCancelled(null, null)) return;
+      }
       session = await _startSession(
         account: _account,
         location: location,
         log: AppLog.write,
-        directFallback: _settings.directFallback,
+        // Android has no "direct" path in v1 (the switch is hidden there).
+        directFallback: _settings.directFallback && !Host.isAndroid,
         // After a network change the bypass route may point at a dead gateway.
         beforeReconnect: () async {
           final t = tun;
@@ -611,6 +869,7 @@ class VpnController extends ChangeNotifier {
           bypass: session.upstreamAddress,
           // Defence in depth: the control-plane IPs also get routes out of the real adapter.
           extraBypass: [for (final list in ControlPlane.pinned.values) ...list],
+          label: _statusLabel(location),
           log: AppLog.write,
         );
       } finally {
@@ -631,6 +890,7 @@ class VpnController extends ChangeNotifier {
     }
     _session = session;
     _tun = tun;
+    _connectedLocation = location;
     _phase = VpnPhase.connected; // the phases stream replays the real phase on listen
     _connectedSince = DateTime.now();
     _phaseSub = session.phases.listen((phase) {
@@ -641,13 +901,14 @@ class VpnController extends ChangeNotifier {
         final reconnected = phase == VpnPhase.connected && _phase == VpnPhase.reconnecting;
         _phase = phase;
         if (reconnected) _scheduleExitCheck(session!);
+        _tun?.setStatus(_statusLabel(_connectedLocation));
         _notify();
       }
     });
     unawaited(tun.exited.then((_) {
       // Only an error if we did not ask for it (_tun is cleared by _disconnect).
       if (_tun == tun) {
-        _disconnect(error: 'The tunnel program stopped. ${tun!.lastOutput}'.trim());
+        _disconnect(error: tun!.exitMessage);
       }
     }));
     _speed.reset();
@@ -690,6 +951,7 @@ class VpnController extends ChangeNotifier {
     _keepQuota(session);
     _session = null;
     _tun = null;
+    _connectedLocation = null;
     _connectedSince = null;
     _statsTimer?.cancel();
     _statsTimer = null;
@@ -733,7 +995,29 @@ class VpnController extends ChangeNotifier {
     }
   }
 
-  Future<void> _stopQuietly(WindowsTun? tun, VpnSession? session) async {
+  /// The short status a platform may show for the running tunnel (the Android
+  /// notification): "Protected · Austria", or "Reconnecting…" while the upstream
+  /// is being restored. Recommended shows the country once the exit check knows it.
+  String _statusLabel(Location? location) {
+    if (_phase == VpnPhase.reconnecting) return 'Reconnecting…';
+    String? country;
+    if (location != null && !location.isRecommended) {
+      country = location.countryName;
+    } else {
+      final code = _exitCountryCode?.toUpperCase();
+      if (code != null) {
+        for (final l in _locations) {
+          if (l.countryCode.toUpperCase() == code) {
+            country = l.countryName;
+            break;
+          }
+        }
+      }
+    }
+    return country == null || country.isEmpty ? 'Protected' : 'Protected · $country';
+  }
+
+  Future<void> _stopQuietly(TunBackend? tun, VpnSession? session) async {
     try {
       await tun?.stop();
     } catch (_) {}

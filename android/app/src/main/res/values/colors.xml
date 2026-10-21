@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- DESIGN.md: true black base and the brand background of the icon. -->
+    <color name="foxy_bg">#FF000000</color>
+    <color name="ic_launcher_background">#FF0A0C0F</color>
+    <color name="foxy_accent">#FF3DDC97</color>
+</resources>

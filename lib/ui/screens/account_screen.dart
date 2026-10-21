@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../format.dart';
+import '../../platform/host.dart';
 import '../../vpn_controller.dart';
 import '../theme.dart';
 import '../widgets/app_card.dart';
@@ -12,6 +13,7 @@ import '../widgets/foxy_route.dart';
 import '../widgets/foxy_switch.dart';
 import '../widgets/page_header.dart';
 import '../widgets/pressable.dart';
+import 'log_screen.dart';
 
 const kAppVersion = '0.1.0';
 
@@ -32,6 +34,10 @@ class _AccountScreenState extends State<AccountScreen> {
 
   void _openLicenses(BuildContext context) {
     unawaited(_push.push(context, (_) => const _LicensesPage()));
+  }
+
+  void _openLog(BuildContext context) {
+    unawaited(_push.push(context, (_) => const LogScreen()));
   }
 
   Future<void> _signOut() async {
@@ -72,17 +78,26 @@ class _AccountScreenState extends State<AccountScreen> {
                                 resetsAt: controller.quotaResetsAt,
                               ),
                               const SizedBox(height: 12),
-                              _DirectFallbackCard(
-                                value: controller.directFallback,
-                                showNextTimeNote: !idle,
-                                onChanged: (v) => unawaited(controller.setDirectFallback(v)),
-                              ),
-                              const SizedBox(height: 12),
+                              // Android: the app itself is outside the VPN, but v1 does not
+                              // offer "direct" connections for blocked ports there.
+                              if (!Host.isAndroid) ...[
+                                _DirectFallbackCard(
+                                  value: controller.directFallback,
+                                  showNextTimeNote: !idle,
+                                  onChanged: (v) => unawaited(controller.setDirectFallback(v)),
+                                ),
+                                const SizedBox(height: 12),
+                              ],
                               AppCard(
                                 padding: EdgeInsets.zero,
                                 child: Column(
                                   children: [
-                                    _ActionRow(icon: FoxyIcons.doc, label: 'Open log', onTap: controller.openLog),
+                                    _ActionRow(
+                                      icon: FoxyIcons.doc,
+                                      label: 'Open log',
+                                      // Windows: Notepad. Android: a page in the app.
+                                      onTap: Host.isAndroid ? () => _openLog(context) : controller.openLog,
+                                    ),
                                     const Divider(height: 1, indent: 52),
                                     _ActionRow(
                                       icon: FoxyIcons.info,

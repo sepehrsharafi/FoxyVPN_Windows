@@ -11,6 +11,8 @@ env:
   TUN2SOCKS_ZIP_SHA256: c5d46e9452f6c9cc7c15ab9158d6d6a0169ceecd6bca019ce476b49337d2be43
   TUN2SOCKS_LICENSE_SHA256: 796abbf6d0258a01321f88f72c1d712417acdd75342510f0796f7c567b6f05e5
   WINTUN_ZIP_SHA256: 07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51
+  # Inno Setup, installed with Chocolatey only if the runner does not have ISCC.exe.
+  INNO_SETUP_VERSION: 6.5.4
 
 jobs:
   build:
@@ -65,20 +67,186 @@ jobs:
             if (-not (Test-Path "$release/$f")) { throw "$f is missing from the release folder" }
           }
 
-          # Zip it as FoxyVPN-Windows.zip (kept outside the folder so it is not zipped into itself).
-          New-Item -ItemType Directory -Force dist | Out-Null
-          Compress-Archive -Path "$release/*" -DestinationPath dist/FoxyVPN-Windows.zip
+      # The Visual C++ runtime goes next to foxyvpn.exe (app-local deployment, which
+      # Microsoft allows for these files), so nothing has to be installed system-wide.
+      # The DLLs come from the Visual Studio on this runner.
+      - name: Add the app-local Visual C++ runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $release = (Resolve-Path 'build/windows/x64/runner/Release').Path
 
-      # The folder, for people who prefer to see the files.
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path $vswhere)) { throw "vswhere.exe not found at $vswhere" }
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if ($LASTEXITCODE -ne 0 -or -not $vs) { throw 'No Visual Studio with the C++ x64 tools found' }
+          $vs = "$vs".Trim()
+          Write-Host "Visual Studio: $vs"
+
+          # VC\Redist\MSVC\<version>\x64\Microsoft.VC143.CRT (newest version, release CRT only)
+          $crt = Get-ChildItem -Path (Join-Path $vs 'VC\Redist\MSVC') -Directory |
+            ForEach-Object {
+              $d = Join-Path $_.FullName 'x64'
+              if (Test-Path $d) { Get-ChildItem -Path $d -Directory -Filter 'Microsoft.VC*.CRT' }
+            } |
+            Where-Object { $_.Parent.Parent.Name -match '^\d+\.\d+' } |
+            Sort-Object { [version]($_.Parent.Parent.Name -replace '[^0-9.]', '') } -Descending |
+            Select-Object -First 1
+          if (-not $crt) { throw "No Microsoft.VC*.CRT redist folder found under $vs\VC\Redist\MSVC" }
+          Write-Host "Redist folder: $($crt.FullName)"
+
+          $required = 'msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll'
+          foreach ($f in $required) {
+            $src = Join-Path $crt.FullName $f
+            if (-not (Test-Path $src)) { throw "$f is missing from $($crt.FullName)" }
+            Copy-Item $src $release
+          }
+
+          # Any other VC runtime DLL that something in the release folder imports
+          # (checked with dumpbin) must be there too: fail now instead of on a user's PC.
+          $dumpbin = Get-ChildItem -Path (Join-Path $vs 'VC\Tools\MSVC') -Directory |
+            ForEach-Object { Join-Path $_.FullName 'bin\Hostx64\x64\dumpbin.exe' } |
+            Where-Object { Test-Path $_ } | Select-Object -Last 1
+          if (-not $dumpbin) { throw 'dumpbin.exe not found, cannot check the runtime dependencies' }
+          $crtPattern = '^(msvcp|vcruntime|concrt|vcomp|vccorlib|mfc)\d+\w*\.dll$'
+          $missing = @()
+          foreach ($bin in Get-ChildItem -Path $release -File | Where-Object { $_.Extension -in '.exe', '.dll' }) {
+            $deps = & $dumpbin /nologo /dependents $bin.FullName
+            if ($LASTEXITCODE -ne 0) { throw "dumpbin failed for $($bin.Name)" }
+            foreach ($line in $deps) {
+              $name = "$line".Trim()
+              if ($name -match $crtPattern -and -not (Test-Path (Join-Path $release $name))) {
+                $src = Join-Path $crt.FullName $name
+                if (Test-Path $src) { Copy-Item $src $release; Write-Host "Also copied $name (needed by $($bin.Name))" }
+                else { $missing += "$name (needed by $($bin.Name))" }
+              }
+            }
+          }
+          if ($missing.Count -gt 0) { throw "Runtime DLLs needed but not available: $($missing -join ', ')" }
+
+          # License note for the redistributed DLLs.
+          $ver = (Get-Item (Join-Path $release 'vcruntime140.dll')).VersionInfo.ProductVersion
+          $note = @"
+          Microsoft Visual C++ runtime (app-local copy)
+
+          msvcp140.dll, vcruntime140.dll and vcruntime140_1.dll (version $ver) next to foxyvpn.exe
+          are the Microsoft Visual C++ runtime. They are copied unchanged from Microsoft Visual
+          Studio's redistributable folder (VC\Redist\MSVC\...\x64\Microsoft.VC*.CRT) and are
+          distributed with this application under the "Distributable Code" terms of the
+          Microsoft Visual Studio license, which allows deploying them app-local:
+          https://learn.microsoft.com/en-us/cpp/windows/determining-which-dlls-to-redistribute
+          https://visualstudio.microsoft.com/license-terms/
+
+          They are used only by FoxyVPN. Nothing is installed system-wide.
+          "@
+          $note = ($note -split "`r?`n" | ForEach-Object { $_.TrimStart() }) -join "`r`n"
+          New-Item -ItemType Directory -Force "$release/licenses" | Out-Null
+          Set-Content -Path "$release/licenses/Microsoft-VC-Runtime-NOTICE.txt" -Value $note -Encoding utf8
+
+          foreach ($f in $required) {
+            if (-not (Test-Path (Join-Path $release $f))) { throw "$f is missing from the release folder" }
+          }
+
+      # The portable copy: the same folder as one zip (kept outside the folder so it is not zipped into itself).
+      - name: Zip the portable copy
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path 'build/windows/x64/runner/Release/*' -DestinationPath dist/FoxyVPN-Windows.zip
+
+      - name: Build the installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          # The pubspec version, without the +build part: 0.1.0+1 -> 0.1.0
+          $line = Select-String -Path pubspec.yaml -Pattern '^version:' | Select-Object -First 1
+          if (-not $line -or -not ($line.Line -match '^version:\s*(\d+\.\d+\.\d+)(\+\S*)?\s*$')) {
+            throw "Cannot read a x.y.z version from pubspec.yaml (found: $($line.Line))"
+          }
+          $version = $Matches[1]
+          Write-Host "Version: $version"
+          "APP_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+          # ISCC.exe: use the one on the runner, else install the pinned Inno Setup.
+          function Find-Iscc {
+            foreach ($dir in ${env:ProgramFiles(x86)}, $env:ProgramFiles) {
+              $p = Join-Path $dir 'Inno Setup 6\ISCC.exe'
+              if (Test-Path $p) { return $p }
+            }
+            $cmd = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+            if ($cmd) { return $cmd.Source }
+            return $null
+          }
+          $iscc = Find-Iscc
+          if (-not $iscc) {
+            choco install innosetup --version=$env:INNO_SETUP_VERSION -y --no-progress
+            if ($LASTEXITCODE -ne 0) {
+              # The pinned version is gone from the feed (or the install failed): take the current one.
+              Write-Host "::warning::choco could not install Inno Setup $env:INNO_SETUP_VERSION (exit $LASTEXITCODE); falling back to the latest version"
+              choco install innosetup -y --no-progress
+              if ($LASTEXITCODE -ne 0) { throw "choco install innosetup failed ($LASTEXITCODE)" }
+            }
+            $iscc = Find-Iscc
+          }
+          if (-not $iscc) { throw 'ISCC.exe not found' }
+          Write-Host "ISCC: $iscc"
+
+          & $iscc "/DAppVersion=$version" installer/foxyvpn.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed ($LASTEXITCODE)" }
+
+          $setup = "dist/FoxyVPN-Setup-$version.exe"
+          if (-not (Test-Path $setup)) { throw "$setup was not produced" }
+          Write-Host ("{0}: {1:N1} MB" -f $setup, ((Get-Item $setup).Length / 1MB))
+
+      # Install it silently, look at the result, uninstall it silently. The uninstaller runs
+      # foxyvpn.exe --cleanup first, so this also proves that entry point returns instead of hanging.
+      - name: Test install and uninstall
+        shell: pwsh
+        timeout-minutes: 10
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setup = (Resolve-Path "dist/FoxyVPN-Setup-$env:APP_VERSION.exe").Path
+          $dir = Join-Path $env:RUNNER_TEMP 'FoxyVPN-test-install'
+          $log = Join-Path $env:RUNNER_TEMP 'foxyvpn-setup.log'
+
+          $p = Start-Process $setup -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR=`"$dir`" /LOG=`"$log`"" -PassThru
+          $null = $p.Handle  # keep a handle: without it $p.ExitCode is empty once the process is gone
+          if (-not $p.WaitForExit(180000)) { $p.Kill(); throw 'Setup did not finish within 3 minutes' }
+          if ($p.ExitCode -ne 0) { Get-Content $log -ErrorAction SilentlyContinue | Select-Object -Last 40; throw "Setup failed ($($p.ExitCode))" }
+
+          foreach ($f in 'foxyvpn.exe', 'flutter_windows.dll', 'tun2socks.exe', 'wintun.dll', 'msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll', 'data\app.so', 'licenses\wintun-LICENSE.txt') {
+            if (-not (Test-Path (Join-Path $dir $f))) { throw "Installed folder is missing $f" }
+          }
+
+          $un = Join-Path $dir 'unins000.exe'
+          if (-not (Test-Path $un)) { throw 'unins000.exe is missing' }
+          $p = Start-Process $un -ArgumentList '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART' -PassThru
+          $null = $p.Handle
+          $p.WaitForExit(300000) | Out-Null
+          # The uninstaller may hand over to a copy of itself and exit early: wait for the folder to go.
+          $deadline = (Get-Date).AddMinutes(5)
+          while ((Test-Path $dir) -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 2 }
+          if (Test-Path $dir) {
+            Get-Process foxyvpn -ErrorAction SilentlyContinue | Stop-Process -Force
+            throw 'Uninstall did not finish within 5 minutes (does foxyvpn.exe --cleanup return?)'
+          }
+          if ($p.HasExited -and $p.ExitCode -ne 0) { throw "Uninstall failed ($($p.ExitCode))" }
+          if (Test-Path (Join-Path $env:ProgramData 'FoxyVPN')) { throw '%ProgramData%\FoxyVPN is still there after uninstall' }
+
+      # The installer: this is the download.
       - uses: actions/upload-artifact@v4
         with:
-          name: FoxyVPN-Windows
-          path: build/windows/x64/runner/Release/
+          name: FoxyVPN-Setup
+          path: dist/FoxyVPN-Setup-*.exe
+          if-no-files-found: error
           retention-days: 14
 
-      # The same thing as one zip.
+      # The portable copy (no installer, no uninstaller; see README).
       - uses: actions/upload-artifact@v4
         with:
-          name: FoxyVPN-Windows-zip
+          name: FoxyVPN-Windows-portable-zip
           path: dist/FoxyVPN-Windows.zip
+          if-no-files-found: error
           retention-days: 14

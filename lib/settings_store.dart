@@ -1,10 +1,14 @@
-// Small, non-secret app settings in %APPDATA%\FoxyVPN\settings.json: the email
-// the user signed in with (shown in the UI), the selected location and the
+// Small, non-secret app settings in %APPDATA%\FoxyVPN\settings.json (Android:
+// settings.json in the app's private files directory): the email the user
+// signed in with (shown in the UI), the selected location and the
 // direct-fallback switch.
 // Never holds tokens (those are in token_store.dart, encrypted).
 
 import 'dart:convert';
 import 'dart:io';
+
+import 'platform/android_platform.dart';
+import 'platform/host.dart';
 
 class SettingsStore {
   SettingsStore([File? file]) : _file = file ?? _defaultFile() {
@@ -15,6 +19,7 @@ class SettingsStore {
   late Map<String, Object?> _values;
 
   static File _defaultFile() {
+    if (Host.isAndroid) return File('${AndroidPlatform.filesDir}/settings.json');
     final appData = Platform.environment['APPDATA'] ?? Directory.systemTemp.path;
     return File('$appData\\FoxyVPN\\settings.json');
   }

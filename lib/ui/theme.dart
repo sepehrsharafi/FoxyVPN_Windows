@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show LicenseEntryWithLineBreaks, LicenseRegistry;
 import 'package:flutter/services.dart' show rootBundle;
 
+import '../platform/host.dart';
+
 /// Colour tokens from DESIGN.md. Dark only, on a true black base.
 ///
 /// Rule: [accent] never decorates. If something is mint, you are protected
@@ -137,6 +139,16 @@ void registerUiLicenses() {
       yield LicenseEntryWithLineBreaks(['Urbanist (font)'], ofl);
     } catch (_) {
       // Missing in a stripped test bundle; nothing to show.
+    }
+    // The Android build ships hev-socks5-tunnel (native code) and follows the
+    // original FoxyVPN Android app's setup; their licenses travel with it.
+    if (Host.isAndroid) {
+      try {
+        final native = await rootBundle.loadString('assets/licenses/android-native.txt');
+        yield LicenseEntryWithLineBreaks(['hev-socks5-tunnel, lwIP, libyaml', 'FoxyVPN for Android (Vauth)'], native);
+      } catch (_) {
+        // Missing in a stripped test bundle; nothing to show.
+      }
     }
     yield const LicenseEntryWithLineBreaks(
       ['flag-icons (flag artwork, via country_flags)'],

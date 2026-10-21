@@ -168,3 +168,62 @@ Preparing (startup cleanup), loading locations, locations failed (inline retry),
 connecting, connected, reconnecting, disconnecting, quota used up, dropped (modal and Home), signed
 out, a conflict (modal and the top-row icon), a location with no ping reply, a ping still being
 measured, large text (1.3×).
+
+## Android
+The same app on phones (Android 8+, `com.foxyvpn.app`). The look is the same; only the shell differs.
+
+**Layout.** No title bar and no window management. Edge to edge with dark system bars; the content stays
+inside the safe area (status bar, navigation / gesture bar, cutout) and is at most 480 wide, centred, on
+larger screens. Portrait. Designed and tested from 360 × 640 to 412 × 915 dp (and 1.3× text): on Home the
+power switch flexes (168 down to 100) between the timer and the panel, and the panel stays anchored above
+the bottom inset. The back gesture or button goes back a page. Touch wording says "Tap" where Windows
+says "Click" (`Host.clickVerb`). "Open log" opens an in-app page (monospace text, Copy). The
+"Allow apps the VPN can't carry" switch is not offered on Android.
+
+**How the tunnel works.** Everything above the TUN layer is the shared Dart code. The TUN layer is a
+Kotlin `VpnService` that creates the TUN (198.18.0.1/15, fd66:6f78:7976::1/64, routes 0.0.0.0/0 and ::/0,
+DNS 198.18.0.2, MTU 1500; on Android 13+ the local ranges 10/8, 172.16/12, 192.168/16, 100.64/10,
+169.254/16 and multicast are excluded) and runs **hev-socks5-tunnel** (MIT, built with the NDK, vendored
+in `android/app/src/main/jni`) on it, pointed at the app's own SOCKS5 server on 127.0.0.1. hev sends UDP
+as SOCKS5 UDP ASSOCIATE, so DNS (port 53) is answered by our server over DoH exactly as on Windows (hev's
+mapdns is off). The app's own package is a disallowed application of the VPN, so the upstream connection
+to Mozilla, the control-plane API and the pings never enter the tunnel: no loops, no `protect()`, no
+bypass routes. Always-on VPN and "Block connections without VPN" work (the service answers the
+`android.net.VpnService` action; the app then connects by itself).
+
+**Process model (engine lifetime).** The tunnel core runs in one Flutter engine that does not belong to the
+Activity: it lives in `FlutterEngineCache` (`FoxyEngine`), the Activity only attaches to it, and the
+foreground service (ongoing notification "Protected · Austria" with a Disconnect action, type
+`specialUse`) keeps the process, and so the engine, alive. Swiping the app away or turning the screen off
+does not stop the VPN; reopening the app attaches to the running engine. With the VPN off, the engine is
+destroyed when the Activity finishes. No wake lock. Dart and Kotlin talk over one MethodChannel
+(`foxyvpn/vpn`) and one EventChannel (`foxyvpn/vpn/events`). The sign-in tokens are encrypted with an
+Android Keystore AES-GCM key (`SecureStore`), the Android twin of the Windows DPAPI file.
+**Quick Settings tile.** `FoxyTileService` (`vpn/FoxyTileService.kt`, label "FoxyVPN", icon
+`ic_stat_foxy`, `BIND_QUICK_SETTINGS_TILE`). Tap while off: pings every location and connects to the
+fastest. Tap while connecting or connected: disconnects. Subtitle: "Tap for fastest" (inactive), "Connecting…"
+or "Protected · Austria" (active; connecting stays active so the tile reads "on" and a tap switches it off),
+"Disconnecting…", and "Sign in first" when signed out (inactive, not unavailable: Android drops taps on an
+unavailable tile, and the tap is what opens the app to sign in).
+It is a *passive* tile (no `ACTIVE_TILE`): the system binds it every time the panel opens, so
+`onStartListening` reads fresh status even if the process was killed; while the panel is open
+`TileStatus.set` pushes changes. Kotlin keeps the phase and label in memory (`TileStatus`; a dead process
+means no VPN) and "signed in" in SharedPreferences (the tile can be shown with no Dart running). Dart reports
+both with `setTileState({signedIn, phase, label})` from `VpnController._syncTile` (called from `_notify`, only
+when something changed, so it covers startup, sign-in and sign-out, connect, reconnect, disconnect); Windows
+has no bridge and sends nothing.
+Tap flow: not signed in, or `VpnService.prepare() != null` (consent needs an Activity) opens `MainActivity`
+(`startActivityAndCollapse`: PendingIntent on API 34+, Intent below), with `EXTRA_QUICK_CONNECT` for the
+consent case so it connects right after the user says yes. Otherwise a connected/connecting tile calls
+`FoxyVpnService.requestDisconnect()` (the notification's Disconnect path; asks Dart directly if the service
+is not up yet), and an off tile does `startForegroundService(ACTION_QUICK_CONNECT =
+"com.foxyvpn.app.QUICK_CONNECT_FASTEST")`, a user interaction Android allows to start a foreground service
+(specialUse has no extra while-in-use limits); if Android refuses anyway the app is opened instead. The
+service enters the foreground at once, starts the shared engine without an Activity (`FoxyEngine.ensure`, the
+always-on path), and emits a `quickConnect` event (queued in the Bridge backlog until Dart listens). Dart's
+`VpnController.quickConnectFastest()`: signed in and idle only; measures again if the locations are older
+than 2 minutes (or waits for pings still running), at most 6 s; picks the lowest ping among non-Recommended
+locations, else Recommended, else the last selected; `select()` (saved) then `connect()`. If nothing comes
+of it the service is told to stop (as for Always-on). A `disconnectRequested` while it is still pinging
+cancels it. The VPN consent is the only step needing an Activity, and it is already granted after the first
+connect; the notification permission is optional (the foreground service works without it).

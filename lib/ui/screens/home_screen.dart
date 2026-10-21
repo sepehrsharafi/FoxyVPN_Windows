@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../../format.dart';
+import '../../platform/host.dart';
 import '../../vpn_controller.dart';
 import '../theme.dart';
 import '../widgets/country_badge.dart';
@@ -94,7 +95,12 @@ class _HomeScreenState extends State<HomeScreen> {
       builder: (context, box) {
         var size = 168.0;
         var padBottom = 0.0;
-        // The hairline ring sits ~9 px outside the disc.
+        // On a short screen (a small phone) the switch flexes: it shrinks, down to
+        // 100, so that it and its hint always fit between the timer and the panel.
+        // The hairline ring sits ~9 px outside the disc. (The 400 x 720 window has
+        // room for the full size, so nothing changes there.)
+        final fits = box.maxHeight - hintHeight - 18;
+        if (fits < size) size = fits.clamp(100.0, 168.0);
         final margin = (box.maxHeight - (size + hintHeight)) / 2 - 9;
         if (margin < bottomNeed) {
           padBottom = bottomNeed;
@@ -366,13 +372,15 @@ class _HintLine extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = controller;
     final String text = switch (c.state) {
-      ConnState.connected => 'Click to disconnect',
-      ConnState.connecting => 'Click to cancel',
+      ConnState.connected => '${Host.clickVerb} to disconnect',
+      ConnState.connecting => '${Host.clickVerb} to cancel',
       ConnState.reconnecting => 'Trying to restore the connection',
       ConnState.disconnecting => 'One moment',
       ConnState.preparing => 'Getting ready…',
       ConnState.idle =>
-        c.selected == null ? 'Choose a location to connect' : (c.dropped ? 'Click to reconnect' : 'Click to connect'),
+        c.selected == null
+            ? 'Choose a location to connect'
+            : (c.dropped ? '${Host.clickVerb} to reconnect' : '${Host.clickVerb} to connect'),
     };
     return ConstrainedBox(
       constraints: const BoxConstraints(minHeight: 24),

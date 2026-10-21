@@ -1,8 +1,11 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:foxyvpn/platform/android_platform.dart';
 import 'package:foxyvpn/ui/app.dart';
 import 'package:foxyvpn/vpn_controller.dart';
+import 'package:foxyvpn/windows_cleanup.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'app_log.dart';
@@ -15,9 +18,35 @@ const _windowBackground = Color(0xFF0A0C0F);
 /// this has to cover that step's own timeouts plus the teardown.
 const shutdownCap = Duration(seconds: 60);
 
-Future<void> main() async {
+Future<void> main(List<String> args) async {
+  // Run by the installer / uninstaller: undo what the app leaves on the PC and
+  // exit. Before any UI or window setup (and before anything else is touched).
+  if (Platform.isWindows && args.contains('--cleanup')) {
+    exit(await runWindowsCleanup(removeUserData: args.contains('--remove-data')));
+  }
+
   WidgetsFlutterBinding.ensureInitialized();
 
+  if (Platform.isAndroid) {
+    await _mainAndroid();
+    return;
+  }
+  await _mainWindows();
+}
+
+/// Android: no window management at all. The tunnel runs in this engine, which
+/// outlives the Activity while the VPN is on (see android/.../FoxyEngine.kt).
+Future<void> _mainAndroid() async {
+  // Files directory and the saved sign-in (Android Keystore) before any store is built.
+  await AndroidPlatform.init(onError: AppLog.write);
+  final controller = VpnController();
+  // The service may have been started by Android (Always-on VPN) with no UI:
+  // the controller connects by itself then, see VpnController.init.
+  unawaited(controller.init());
+  runApp(FoxyApp(controller: controller));
+}
+
+Future<void> _mainWindows() async {
   // The native window stays hidden until shown (the runner no longer shows it
   // on the first frame), so whatever fails below, show() is still attempted.
   // windows/runner/flutter_window.cpp also shows it after 3 s as a last resort.
@@ -76,6 +105,12 @@ class _CloseHandler with WindowListener {
   void onWindowClose() async {
     if (_closing) return;
     _closing = true;
+    // Gone at once: closing never looks frozen while the teardown runs.
+    try {
+      await windowManager.hide();
+    } catch (e) {
+      AppLog.write('Hiding the window failed: $e');
+    }
     try {
       await _controller.shutdown().timeout(shutdownCap);
     } catch (e) {

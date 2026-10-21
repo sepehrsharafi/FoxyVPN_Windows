@@ -1,5 +1,7 @@
-// Saves the sign-in tokens encrypted with Windows DPAPI, so only this
-// Windows user account can read them.
+// Saves the sign-in tokens encrypted, so only this user can read them:
+//  * Windows: DPAPI, so only this Windows user account can read the file.
+//  * Android: AES-GCM with a key in the Android Keystore (see
+//    android/.../SecureStore.kt), through the platform channel.
 
 import 'dart:convert';
 import 'dart:ffi';
@@ -9,6 +11,8 @@ import 'dart:typed_data';
 import 'package:ffi/ffi.dart';
 
 import 'fxa.dart';
+import 'platform/android_platform.dart';
+import 'platform/host.dart';
 
 final class _DataBlob extends Struct {
   @Uint32()
@@ -60,9 +64,15 @@ Uint8List _run(List<int> data, {required bool protect}) {
 }
 
 class TokenStore {
-  TokenStore([File? file]) : _file = file ?? _defaultFile();
+  /// Windows: a DPAPI-encrypted file ([file], or %APPDATA%\FoxyVPN\auth.bin).
+  /// Android (no [file]): the Android Keystore store behind the platform
+  /// channel; its values are loaded into memory at startup (see
+  /// lib/platform/android_platform.dart), so this stays synchronous.
+  TokenStore([File? file]) : _file = file ?? (Host.isAndroid ? null : _defaultFile());
 
-  final File _file;
+  final File? _file;
+
+  static const _androidKey = 'auth';
 
   static File _defaultFile() {
     final appData = Platform.environment['APPDATA'] ?? Directory.systemTemp.path;
@@ -70,9 +80,17 @@ class TokenStore {
   }
 
   AuthTokens? load() {
+    final file = _file;
     try {
-      if (!_file.existsSync()) return null;
-      final json = utf8.decode(dpapiUnprotect(_file.readAsBytesSync()));
+      final String json;
+      if (file == null) {
+        final saved = AndroidPlatform.secureGet(_androidKey);
+        if (saved == null) return null;
+        json = saved;
+      } else {
+        if (!file.existsSync()) return null;
+        json = utf8.decode(dpapiUnprotect(file.readAsBytesSync()));
+      }
       return AuthTokens.fromJson(jsonDecode(json) as Map<String, dynamic>);
     } catch (_) {
       // Corrupt or from another Windows user: behave as signed out.
@@ -81,13 +99,23 @@ class TokenStore {
   }
 
   void save(AuthTokens tokens) {
-    _file.parent.createSync(recursive: true);
-    final tmp = File('${_file.path}.tmp');
+    final file = _file;
+    if (file == null) {
+      AndroidPlatform.securePut(_androidKey, jsonEncode(tokens.toJson()));
+      return;
+    }
+    file.parent.createSync(recursive: true);
+    final tmp = File('${file.path}.tmp');
     tmp.writeAsBytesSync(dpapiProtect(utf8.encode(jsonEncode(tokens.toJson()))), flush: true);
-    tmp.renameSync(_file.path);
+    tmp.renameSync(file.path);
   }
 
   void clear() {
-    if (_file.existsSync()) _file.deleteSync();
+    final file = _file;
+    if (file == null) {
+      AndroidPlatform.secureDelete(_androidKey);
+      return;
+    }
+    if (file.existsSync()) file.deleteSync();
   }
 }
