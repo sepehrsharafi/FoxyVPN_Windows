@@ -60,7 +60,7 @@ Built with [Flutter](https://flutter.dev). See [Windows](docs/windows.md#buildin
 
 The design notes are in [docs/DESIGN.md](docs/DESIGN.md).
 
-## Credits and licenses
+## Credits & licenses
 
 - FoxyVPN: MIT license (see [LICENSE](LICENSE)). Based on [FoxyVPN by Vauth](https://github.com/Vauth/FoxyVPN), also MIT.
 - [tun2socks](https://github.com/xjasonlyu/tun2socks) by xjasonlyu (MIT) and
