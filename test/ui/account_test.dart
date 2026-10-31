@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:foxyvpn/format.dart';
 import 'package:foxyvpn/vpn_controller.dart';
 
 import 'test_support.dart';
@@ -20,7 +21,9 @@ void main() {
 
     expect(find.text('alex@example.com'), findsOneWidget);
     expect(find.text('11.0 GB left of 50.0 GB'), findsOneWidget);
-    expect(find.text('Resets 1 Nov'), findsOneWidget);
+    // The fake's reset date is fixed, so the expected text follows today's date
+    // (year and time are added once it is near or past).
+    expect(find.text('Resets ${formatResetDate(c.quotaResetsAt!)}'), findsOneWidget);
     expect(find.text('Open log'), findsOneWidget);
     expect(find.text('Licenses'), findsOneWidget);
     expect(find.text('Sign out'), findsOneWidget);
