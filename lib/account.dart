@@ -26,6 +26,9 @@ class Account {
     _remember(await _fxa.submitCode(sessionToken, code));
   }
 
+  /// Tokens obtained outside the email/password form (Mozilla's page sign-in).
+  void adopt(AuthTokens tokens) => _remember(tokens);
+
   /// A valid access token, refreshing it if it has expired.
   Future<String> accessToken() async {
     final current = _tokens ??= _store.load();

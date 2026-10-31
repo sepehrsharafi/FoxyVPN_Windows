@@ -7,6 +7,7 @@ import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 
+import 'app_log.dart';
 import 'http_util.dart';
 
 const _authServer = 'https://api.accounts.firefox.com/v1';
@@ -129,13 +130,33 @@ class FxaClient {
   AuthTokens _tokensFrom(Map<String, dynamic> data, {String? fallbackRefreshToken}) =>
       tokensFromResponse(data, fallbackRefreshToken: fallbackRefreshToken);
 
+  /// Sends /oauth/token from Mozilla's own page (Android, mozilla_page.dart): on
+  /// some networks Mozilla refuses it from apps with HTTP 406. Null, or a throw
+  /// (no page, e.g. the VPN started without the app's window), sends it directly.
+  static Future<({int statusCode, String body})> Function(Uri uri, Map<String, String> headers, String body)?
+      pageSender;
+
   Future<Map<String, dynamic>> _post(String path, Map<String, dynamic> json,
       {String? sessionToken}) async {
     final uri = Uri.parse('$_authServer$path');
     final body = utf8.encode(jsonEncode(json));
-    final response = await sendJson('POST', uri, body: body, headers: {
-      if (sessionToken != null) 'authorization': hawkHeader('POST', uri, sessionToken, body),
-    });
+    final authorization = sessionToken == null ? null : hawkHeader('POST', uri, sessionToken, body);
+    ({int statusCode, String body})? viaPage;
+    if (pageSender case final send? when path == '/oauth/token') {
+      try {
+        viaPage = await send(uri, {'content-type': 'application/json', 'authorization': ?authorization},
+            utf8.decode(body));
+      } catch (e) {
+        AppLog.write('Token request through Mozilla\'s page failed, sending it directly: $e');
+      }
+    }
+    final ({int statusCode, String body}) response;
+    if (viaPage != null) {
+      response = viaPage;
+    } else {
+      final direct = await sendJson('POST', uri, body: body, headers: {'authorization': ?authorization});
+      response = (statusCode: direct.statusCode, body: direct.body);
+    }
     if (response.statusCode >= 400) {
       Map<String, dynamic> error = {};
       try {

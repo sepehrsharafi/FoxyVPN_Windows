@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:foxyvpn/fxa.dart';
+import 'package:foxyvpn/mozilla_page.dart';
 import 'package:foxyvpn/platform/android_platform.dart';
 import 'package:foxyvpn/platform/windows_tray.dart';
 import 'package:foxyvpn/ui/app.dart';
@@ -40,6 +42,15 @@ Future<void> main(List<String> args) async {
 Future<void> _mainAndroid() async {
   // Files directory and the saved sign-in (Android Keystore) before any store is built.
   await AndroidPlatform.init(onError: AppLog.write);
+  // Token requests go out from Mozilla's own page while the app's window has
+  // one (see FxaClient.pageSender); without it they are sent directly.
+  MozillaPage.enabled = true;
+  FxaClient.pageSender = (uri, headers, body) async {
+    final page = MozillaPage.active.value;
+    if (page == null) throw StateError('no Mozilla page without the app\'s window');
+    final r = await page.post(uri, headers, body);
+    return (statusCode: r.status, body: r.body);
+  };
   final controller = VpnController();
   // The service may have been started by Android (Always-on VPN) with no UI:
   // the controller connects by itself then, see VpnController.init.

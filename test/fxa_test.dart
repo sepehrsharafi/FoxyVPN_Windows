@@ -65,6 +65,32 @@ void main() {
     expect(() => tokensFromResponse({}), throwsA(isA<FxaError>()));
   });
 
+  group('token requests through Mozilla\'s page', () {
+    tearDown(() => FxaClient.pageSender = null);
+    final current = AuthTokens(accessToken: 'old', refreshToken: 'r1', expiresAt: DateTime(2000));
+
+    test('a refresh goes out through the page when one is there', () async {
+      final sent = <(Uri, Map<String, String>, String)>[];
+      FxaClient.pageSender = (uri, headers, body) async {
+        sent.add((uri, headers, body));
+        return (statusCode: 200, body: '{"access_token":"new","expires_in":3600}');
+      };
+      final renewed = await FxaClient().refresh(current);
+      expect(renewed.accessToken, 'new');
+      expect(renewed.refreshToken, 'r1');
+      expect(sent.single.$1.path, '/v1/oauth/token');
+      expect(sent.single.$2, {'content-type': 'application/json'});
+      expect(jsonDecode(sent.single.$3), containsPair('grant_type', 'refresh_token'));
+    });
+
+    test('Mozilla\'s answer through the page is handled like a direct one', () async {
+      FxaClient.pageSender = (uri, headers, body) async =>
+          (statusCode: 400, body: '{"errno":110,"message":"Invalid token"}');
+      await expectLater(
+          FxaClient().refresh(current), throwsA(isA<FxaError>().having((e) => e.isPermanent, 'permanent', isTrue)));
+    });
+  });
+
   test('email normalisation strips spaces and lowercases', () {
     expect(normalizeEmail(' Foo@Example.ORG ​'), 'foo@example.org');
   });

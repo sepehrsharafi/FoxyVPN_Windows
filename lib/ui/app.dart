@@ -4,6 +4,7 @@ import 'dart:ui' show PointerDeviceKind;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../mozilla_page.dart';
 import '../platform/host.dart';
 import '../vpn_controller.dart';
 import 'screens/home_screen.dart';
@@ -103,14 +104,20 @@ class _AndroidFrameState extends State<AndroidFrame> {
       // Left and right insets too (a notch in landscape), top for the status bar,
       // bottom for the gesture / navigation bar; the keyboard is handled by each
       // Scaffold (it resizes for the keyboard).
-      child: SafeArea(
-        child: Align(
-          alignment: Alignment.topCenter,
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: AndroidFrame.maxContentWidth),
-            child: ClipRect(child: widget.child),
+      child: Stack(
+        children: [
+          // Mozilla's page, invisible, for token requests (lib/mozilla_page.dart).
+          if (MozillaPage.enabled) MozillaPage.obtain().host(),
+          SafeArea(
+            child: Align(
+              alignment: Alignment.topCenter,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: AndroidFrame.maxContentWidth),
+                child: ClipRect(child: widget.child),
+              ),
+            ),
           ),
-        ),
+        ],
       ),
     );
   }

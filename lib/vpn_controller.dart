@@ -15,7 +15,7 @@ import 'package:flutter/foundation.dart';
 import 'account.dart';
 import 'app_log.dart';
 import 'errors.dart';
-import 'fxa.dart' show LoginDone, LoginNeedsCode, LoginStep;
+import 'fxa.dart' show AuthTokens, LoginDone, LoginNeedsCode, LoginStep;
 import 'http_util.dart' show ControlPlane;
 import 'platform/android_bridge.dart';
 import 'platform/host.dart';
@@ -419,6 +419,12 @@ class VpnController extends ChangeNotifier {
   Future<void> submitCode(String sessionToken, String code) async {
     await _account.submitCode(sessionToken, code);
     _onSignedIn(_pendingEmail);
+  }
+
+  /// Signs in with tokens from Mozilla's page sign-in.
+  void adoptSignIn(AuthTokens tokens, String? email) {
+    _account.adopt(tokens);
+    _onSignedIn(email?.trim());
   }
 
   void _onSignedIn(String? email) {

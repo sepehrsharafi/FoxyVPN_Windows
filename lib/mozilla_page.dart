@@ -23,6 +23,15 @@ class PageResponse {
 }
 
 class MozillaPage {
+  /// Set by main() on Android. Off in tests, which have no WebView.
+  static bool enabled = false;
+
+  /// The app's one page while the app's window exists (AndroidFrame hosts it);
+  /// null when the engine runs without a window (Android started the VPN).
+  static final active = ValueNotifier<MozillaPage?>(null);
+
+  static MozillaPage obtain() => active.value ??= MozillaPage();
+
   MozillaPage() {
     controller
       ..setJavaScriptMode(JavaScriptMode.unrestricted)

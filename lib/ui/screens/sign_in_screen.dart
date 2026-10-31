@@ -192,7 +192,7 @@ class _SignInScreenState extends State<SignInScreen> {
                           child: AppButton(
                             label: 'Test Mozilla page sign-in',
                             kind: AppButtonKind.text,
-                            onPressed: () => unawaited(_push.push(context, (_) => const PageSignInTestScreen())),
+                            onPressed: () => unawaited(_push.push(context, (_) => PageSignInTestScreen(controller: widget.controller))),
                           ),
                         ),
                       Center(

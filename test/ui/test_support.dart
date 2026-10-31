@@ -157,6 +157,9 @@ class FakeVpnController extends ChangeNotifier implements VpnController {
   }
 
   @override
+  void adoptSignIn(AuthTokens tokens, String? email) => calls.add('adoptSignIn:$email');
+
+  @override
   Future<void> signOut() async {
     calls.add('signOut');
     if (_state != ConnState.idle && _state != ConnState.preparing) {

@@ -17,7 +17,9 @@ import '../../fxa.dart';
 import '../../guardian.dart';
 import '../../http_util.dart';
 import '../../mozilla_page.dart';
+import '../../vpn_controller.dart';
 import '../theme.dart';
+import '../widgets/app_button.dart';
 import '../widgets/page_header.dart';
 
 const _signInUrl = 'https://accounts.firefox.com/?context=fx_desktop_v3&service=sync&action=email';
@@ -90,20 +92,28 @@ class _Step {
 }
 
 class PageSignInTestScreen extends StatefulWidget {
-  const PageSignInTestScreen({super.key});
+  const PageSignInTestScreen({super.key, required this.controller});
+
+  final VpnController controller;
 
   @override
   State<PageSignInTestScreen> createState() => _PageSignInTestScreenState();
 }
 
 class _PageSignInTestScreenState extends State<PageSignInTestScreen> {
-  final _page = MozillaPage();
+  // The app-wide page (hosted by AndroidFrame), the same one later token
+  // refreshes use; a page of its own only if that is off.
+  final _page = MozillaPage.enabled ? MozillaPage.obtain() : MozillaPage();
   final _signIn = WebViewController();
   final _steps = <_Step>[];
   String? _pendingSession;
   String? _email;
   bool _started = false;
   bool _waiting = false;
+  bool _runNow = false;
+
+  /// Set once every check passed: these tokens can sign the app in.
+  AuthTokens? _usable;
 
   @override
   void initState() {
@@ -207,12 +217,13 @@ class _PageSignInTestScreenState extends State<PageSignInTestScreen> {
       }
       if (seen != lastSeen) AppLog.write('Page sign-in test: session status: $seen');
       lastSeen = seen;
-      if (confirmed) break;
+      if (confirmed || _runNow) break;
       await Future<void>.delayed(const Duration(seconds: 3));
     }
     if (!mounted) return;
     setState(() => _waiting = false);
-    if (confirmed) {
+    if (!confirmed && _runNow) AppLog.write('Page sign-in test: checks started by hand, last status: $lastSeen');
+    if (confirmed || _runNow) {
       unawaited(_runChecks(session));
     } else {
       _finish(_add('Mozilla confirmed the sign-in'), _Outcome.failed, 'Not confirmed within 10 minutes: $lastSeen');
@@ -240,28 +251,40 @@ class _PageSignInTestScreenState extends State<PageSignInTestScreen> {
 
     final viaPage = _add('Token request sent from Mozilla\'s page');
     AuthTokens? tokens;
-    try {
-      final request = credentialsTokenRequest(session);
-      final r = await _page.post(request.uri, request.headers, request.body);
-      if (r.status == 200) {
-        tokens = tokensFromResponse(jsonDecode(r.body) as Map<String, dynamic>);
-        _finish(viaPage, _Outcome.ok, 'HTTP 200, got the VPN tokens');
-      } else {
-        _finish(viaPage, _Outcome.failed, 'HTTP ${r.status} ${_excerpt(r.body)}');
+    // Mozilla may take a moment after confirming before the session counts as
+    // confirmed here too ("Unconfirmed session", errno 138): retry a few times.
+    for (var attempt = 1; attempt <= 4; attempt++) {
+      try {
+        final request = credentialsTokenRequest(session);
+        final r = await _page.post(request.uri, request.headers, request.body);
+        if (r.status == 200) {
+          tokens = tokensFromResponse(jsonDecode(r.body) as Map<String, dynamic>);
+          _finish(viaPage, _Outcome.ok, 'HTTP 200, got the VPN tokens${attempt > 1 ? ' (try $attempt)' : ''}');
+          break;
+        }
+        final unconfirmed = r.status == 400 && r.body.contains('"errno":138');
+        _finish(viaPage, unconfirmed && attempt < 4 ? _Outcome.running : _Outcome.failed,
+            'HTTP ${r.status} ${_excerpt(r.body)}${unconfirmed && attempt < 4 ? ' (trying again)' : ''}');
+        if (!unconfirmed) break;
+      } catch (e) {
+        _finish(viaPage, _Outcome.failed, '$e');
+        break;
       }
-    } catch (e) {
-      _finish(viaPage, _Outcome.failed, '$e');
+      await Future<void>.delayed(const Duration(seconds: 4));
     }
     if (tokens == null) return;
 
     final pass = _add('VPN pass from vpn.mozilla.org');
+    var passOk = false;
     try {
       final p = await GuardianClient().proxyPass(tokens.accessToken);
+      passOk = true;
       _finish(pass, _Outcome.ok,
           p.quotaRemaining == null ? 'Got a pass' : 'Got a pass; ${p.quotaRemaining} of ${p.quotaMax} bytes left');
     } catch (e) {
       _finish(pass, _Outcome.failed, '$e');
     }
+    if (passOk && mounted) setState(() => _usable = tokens);
 
     final refresh = _add('Daily token refresh from Mozilla\'s page');
     final refreshToken = tokens.refreshToken;
@@ -303,7 +326,7 @@ class _PageSignInTestScreenState extends State<PageSignInTestScreen> {
       body: SafeArea(
         child: Stack(
           children: [
-            _page.host(),
+            if (!MozillaPage.enabled) _page.host(),
             Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
@@ -311,10 +334,22 @@ class _PageSignInTestScreenState extends State<PageSignInTestScreen> {
                 if (_waiting)
                   Padding(
                     padding: const EdgeInsets.fromLTRB(FoxySpace.screen, 0, FoxySpace.screen, 12),
-                    child: Text(
-                      'Waiting for Mozilla to confirm the sign-in. If the page asks for the code '
-                      'from your email, enter it there; if the email has a confirm link instead, open it.',
-                      style: FoxyText.caption,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Text(
+                          'Waiting for Mozilla to confirm the sign-in. If the page asks for the code '
+                          'from your email, enter it there; if the email has a confirm link instead, open it.',
+                          style: FoxyText.caption,
+                        ),
+                        Center(
+                          child: AppButton(
+                            label: 'Run the checks now',
+                            kind: AppButtonKind.text,
+                            onPressed: () => setState(() => _runNow = true),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 if (_steps.isEmpty)
@@ -323,7 +358,25 @@ class _PageSignInTestScreenState extends State<PageSignInTestScreen> {
                   Expanded(
                     child: ListView(
                       padding: const EdgeInsets.all(FoxySpace.screen),
-                      children: [for (final step in _steps) _StepRow(step)],
+                      children: [
+                        for (final step in _steps) _StepRow(step),
+                        if (_usable case final tokens?) ...[
+                          const SizedBox(height: 8),
+                          Text(
+                            'It works. You can sign the app in with this account now; later token '
+                            'refreshes also go through Mozilla\'s page.',
+                            style: FoxyText.caption,
+                          ),
+                          const SizedBox(height: 12),
+                          AppButton(
+                            label: 'Sign in with this',
+                            onPressed: () {
+                              widget.controller.adoptSignIn(tokens, _email);
+                              Navigator.of(context).maybePop();
+                            },
+                          ),
+                        ],
+                      ],
                     ),
                   ),
               ],
