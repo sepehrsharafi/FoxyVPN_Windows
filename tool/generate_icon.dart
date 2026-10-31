@@ -2,8 +2,10 @@
 //
 //   dart run tool/generate_icon.dart
 //
-// Writes windows/runner/resources/app_icon.ico (16 to 256 px) and
-// assets/brand/mark_256.png. The shapes come from lib/brand_geometry.dart, the
+// Writes windows/runner/resources/app_icon.ico (16 to 256 px),
+// windows/runner/resources/tray_off.ico (the notification-area icon while the
+// VPN is off: the same mark in grey, 16 to 64 px) and assets/brand/mark_256.png.
+// Both .ico files are compiled into foxyvpn.exe (windows/runner/Runner.rc). The shapes come from lib/brand_geometry.dart, the
 // same numbers the app draws its mark with.
 
 import 'dart:io';
@@ -14,6 +16,12 @@ import 'package:foxyvpn/brand_geometry.dart';
 import 'package:image/image.dart' as img;
 
 const _sizes = [16, 24, 32, 48, 64, 128, 256];
+
+/// Notification-area icon sizes: 16 px at 100 % display scaling, 32 px at 200 %.
+const _traySizes = [16, 20, 24, 32, 40, 48, 64];
+
+/// The mark's colour in the "VPN off" tray icon (the app's textDim grey).
+const _trayOffAccent = 0xFF9BA0A9;
 
 /// Each pixel is the average of this many samples per side.
 const _supersample = 4;
@@ -41,7 +49,10 @@ void main() {
   png.parent.createSync(recursive: true);
   png.writeAsBytesSync(img.encodePng(frames[256]!));
 
-  stdout.writeln('Wrote ${ico.path} (${_sizes.join(', ')} px) and ${png.path}');
+  final trayOff = File('${root.path}/windows/runner/resources/tray_off.ico');
+  trayOff.writeAsBytesSync(encodeIco({for (final s in _traySizes) s: render(s, accent: _trayOffAccent)}));
+
+  stdout.writeln('Wrote ${ico.path} (${_sizes.join(', ')} px), ${trayOff.path} and ${png.path}');
 }
 
 Directory _projectRoot() {
@@ -54,7 +65,7 @@ Directory _projectRoot() {
 // Drawing
 // ---------------------------------------------------------------------------
 
-img.Image render(int size) {
+img.Image render(int size, {int accent = brandAccent}) {
   final scale = _markFill * size / _boxHeight; // size of the mark's unit square, in pixels
   Pt place(Pt p) => (
     size / 2 + (p.$1 - _boxCenter.$1) * scale,
@@ -71,7 +82,7 @@ img.Image render(int size) {
 
   (int, int, int) rgb(int argb) => ((argb >> 16) & 0xFF, (argb >> 8) & 0xFF, argb & 0xFF);
   final bg = rgb(brandBackground);
-  final mint = rgb(brandAccent);
+  final mint = rgb(accent);
 
   final image = img.Image(width: size, height: size, numChannels: 4);
   const n = _supersample;

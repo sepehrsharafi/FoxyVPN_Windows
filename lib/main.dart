@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:foxyvpn/platform/android_platform.dart';
+import 'package:foxyvpn/platform/windows_tray.dart';
 import 'package:foxyvpn/ui/app.dart';
 import 'package:foxyvpn/vpn_controller.dart';
 import 'package:foxyvpn/windows_cleanup.dart';
@@ -13,7 +14,7 @@ import 'app_log.dart';
 const _windowSize = Size(400, 720);
 const _windowBackground = Color(0xFF0A0C0F);
 
-/// Overall cap for restoring routes and DNS when the window is closed. A connect
+/// Overall cap for restoring routes and DNS when the app quits. A connect
 /// that is setting up the tunnel is always waited for (see VpnController), so
 /// this has to cover that step's own timeouts plus the teardown.
 const shutdownCap = Duration(seconds: 60);
@@ -52,10 +53,13 @@ Future<void> _mainWindows() async {
   // windows/runner/flutter_window.cpp also shows it after 3 s as a last resort.
   var shown = false;
   VpnController? controller;
+  WindowsShell? shell;
   try {
     await windowManager.ensureInitialized();
     controller = VpnController();
-    windowManager.addListener(_CloseHandler(controller));
+    // Close: hide to the tray or quit (disconnect first), see windows_tray.dart.
+    shell = WindowsShell(controller, shutdownCap: shutdownCap);
+    windowManager.addListener(shell);
     await windowManager.setPreventClose(true);
     await windowManager.waitUntilReadyToShow(
       const WindowOptions(
@@ -92,31 +96,7 @@ Future<void> _mainWindows() async {
   // the UI is already up (the controller reports "preparing" until cleanup is done).
   unawaited(app.init());
   runApp(FoxyApp(controller: app));
-}
-
-/// Window close: stop the VPN (restore routes and DNS) before the process ends.
-class _CloseHandler with WindowListener {
-  _CloseHandler(this._controller);
-
-  final VpnController _controller;
-  bool _closing = false;
-
-  @override
-  void onWindowClose() async {
-    if (_closing) return;
-    _closing = true;
-    // Gone at once: closing never looks frozen while the teardown runs.
-    try {
-      await windowManager.hide();
-    } catch (e) {
-      AppLog.write('Hiding the window failed: $e');
-    }
-    try {
-      await _controller.shutdown().timeout(shutdownCap);
-    } catch (e) {
-      AppLog.write('Shutdown did not finish cleanly: $e');
-    }
-    // Only now (teardown finished, failed, or the cap passed): destroy exits the process.
-    await windowManager.destroy();
-  }
+  // The notification-area icon, once the window is up. Until then a close
+  // (or Setup's quit request) quits for real.
+  shell?.start();
 }

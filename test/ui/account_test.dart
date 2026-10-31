@@ -125,6 +125,21 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('Windows: the tray switch is on by default and toggles', (tester) async {
+    final c = FakeVpnController();
+    await openAccount(tester, c);
+    final title = find.text('Run in the tray when closed');
+    expect(title, findsOneWidget);
+    expect(c.keepInTray, isTrue);
+    await tester.ensureVisible(title);
+    await tester.pump();
+    await tester.tap(title);
+    await tester.pump();
+    expect(c.calls, ['setKeepInTray:false']);
+    expect(c.keepInTray, isFalse);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('while connected the switch notes that it applies next time', (tester) async {
     final c = FakeVpnController()..connectedFor(const Duration(minutes: 2));
     await openAccount(tester, c);

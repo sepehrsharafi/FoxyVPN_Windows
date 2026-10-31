@@ -53,6 +53,8 @@ END
 // Icon with lowest ID value placed first to ensure application icon
 // remains consistent on all systems.
 IDI_APP_ICON            ICON                    "resources\\app_icon.ico"
+// Notification-area icon while the VPN is off (tool/generate_icon.dart).
+IDI_TRAY_OFF            ICON                    "resources\\tray_off.ico"
 
 
 /////////////////////////////////////////////////////////////////////////////

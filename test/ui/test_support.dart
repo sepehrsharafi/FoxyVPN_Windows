@@ -300,6 +300,28 @@ class FakeVpnController extends ChangeNotifier implements VpnController {
     notifyListeners();
   }
 
+  bool _keepInTray = true;
+  bool _trayHintShown = false;
+
+  @override
+  bool get keepInTray => _keepInTray;
+
+  @override
+  Future<void> setKeepInTray(bool value) async {
+    calls.add('setKeepInTray:$value');
+    _keepInTray = value;
+    notifyListeners();
+  }
+
+  @override
+  bool get trayHintShown => _trayHintShown;
+
+  @override
+  void markTrayHintShown() {
+    calls.add('markTrayHintShown');
+    _trayHintShown = true;
+  }
+
   @override
   Future<void> connect() async => calls.add('connect');
 

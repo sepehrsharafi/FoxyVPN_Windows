@@ -4,6 +4,7 @@
 
 #include <string>
 
+#include "app_messages.h"
 #include "flutter_window.h"
 #include "utils.h"
 
@@ -22,6 +23,9 @@ constexpr wchar_t kWindowTitle[] = L"FoxyVPN";
 // to finish closing) before it gives up.
 constexpr ULONGLONG kSingleInstanceWaitMs = 20000;
 
+// How often a second start repeats its "show your window" request.
+constexpr ULONGLONG kShowRequestIntervalMs = 1000;
+
 HANDLE g_instance_mutex = nullptr;
 
 void BringToFront(HWND window) {
@@ -29,6 +33,19 @@ void BringToFront(HWND window) {
     ::ShowWindow(window, SW_RESTORE);
   }
   ::SetForegroundWindow(window);
+}
+
+// Asks the first instance to show its window (it may be hidden in the
+// notification area). Lets it take the foreground: this process has it now
+// (the user just started it), the first instance would otherwise only flash
+// in the taskbar.
+void AskToShow(HWND window, UINT show_message) {
+  DWORD process_id = 0;
+  ::GetWindowThreadProcessId(window, &process_id);
+  if (process_id != 0) {
+    ::AllowSetForegroundWindow(process_id);
+  }
+  ::PostMessageW(window, show_message, 0, 0);
 }
 
 // Returns true if this process may go on and become the app. Returns false if
@@ -39,22 +56,35 @@ void BringToFront(HWND window) {
 // The first instance creates the mutex and owns it until it exits. A second
 // instance cannot own it, so it looks for the first one's window:
 //  * visible (also minimised): bring it to the front, done;
-//  * hidden: the first instance is still starting (the window is shown a moment
-//    after it is created) or closing (the window is hidden while the tunnel is
-//    taken down). Wait for the window to appear, or for the mutex to be released
-//    (the first instance is gone): then this process takes over normally.
+//  * hidden: the first instance is hidden in the notification area, still
+//    starting (the window is shown a moment after it is created) or quitting
+//    (the window is hidden while the tunnel is taken down). Only the first
+//    instance knows which, so it is asked to show its window (kShowMessageName):
+//    it does when it sits in the tray, and ignores the request while starting
+//    or quitting. Then wait for the window to appear, or for the mutex to be
+//    released (the first instance is gone): then this process takes over
+//    normally.
 bool BecomeSingleInstance() {
   g_instance_mutex = ::CreateMutexW(nullptr, TRUE, kAppMutexName);
   if (g_instance_mutex != nullptr && ::GetLastError() != ERROR_ALREADY_EXISTS) {
     return true;  // first instance
   }
 
+  const UINT show_message = ::RegisterWindowMessageW(kShowMessageName);
   const ULONGLONG deadline = ::GetTickCount64() + kSingleInstanceWaitMs;
+  ULONGLONG next_show_request = 0;
   for (;;) {
     HWND window = ::FindWindowW(kWindowClassName, kWindowTitle);
     if (window != nullptr && ::IsWindowVisible(window)) {
       BringToFront(window);
       return false;
+    }
+    // Hidden: ask again now and then (a request sent while the first instance
+    // was still setting up its tray is ignored).
+    if (window != nullptr && show_message != 0 &&
+        ::GetTickCount64() >= next_show_request) {
+      AskToShow(window, show_message);
+      next_show_request = ::GetTickCount64() + kShowRequestIntervalMs;
     }
     if (g_instance_mutex != nullptr) {
       // Owner gone (WAIT_ABANDONED_0 is how a process that exits shows up)?

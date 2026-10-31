@@ -74,8 +74,8 @@ UsePreviousAppDir=yes
 ; One Setup at a time. AppMutex: refuse to replace files of a running app
 ; (the app creates this mutex, see windows/runner/main.cpp). CloseApplications:
 ; Windows' Restart Manager asks a still running app to close; the app turns
-; that request into its normal close (it disconnects the VPN first). The [Code]
-; section below also closes the app by itself before that.
+; that request into a real quit (it disconnects the VPN first). The [Code]
+; section below also quits the app by itself before that.
 SetupMutex=FoxyVPN-Setup
 AppMutex={#AppMutexName}
 CloseApplications=yes
@@ -136,6 +136,9 @@ const
   // Class of the runner window (windows/runner/win32_window.cpp) and its title.
   AppWindowClass = 'FLUTTER_RUNNER_WIN32_WINDOW';
   AppWindowTitle = '{#AppName}';
+  // Registered window message that makes the app quit for real (see
+  // windows/runner/app_messages.h). WM_CLOSE only hides it to the tray now.
+  AppQuitMessageName = 'FoxyVPN-Quit';
   WM_CLOSE = $0010;
   // The app disconnects the VPN (about a second, up to a minute in a bad case).
   CloseWaitSeconds = 60;
@@ -144,20 +147,26 @@ function FoxyFindWindow(ClassName, WindowName: String): Longint;
   external 'FindWindowW@user32.dll stdcall';
 function FoxyPostMessage(Wnd: Longint; Msg: Longint; WParam: Longint; LParam: Longint): Longint;
   external 'PostMessageW@user32.dll stdcall';
+function FoxyRegisterWindowMessage(Name: String): Longint;
+  external 'RegisterWindowMessageW@user32.dll stdcall';
 
 function AppIsRunning: Boolean;
 begin
   Result := CheckForMutexes(AppMutexName);
 end;
 
-{ Asks the running app to close, the same way its close button does (WM_CLOSE):
-  it then disconnects the VPN, restores routes and DNS, and exits. Waits until the
-  app is really gone (its mutex is released). False if it is still there. }
+{ Asks the running app to quit, the same way Quit in its tray menu does (the
+  registered "FoxyVPN-Quit" message; WM_CLOSE would only hide it to the tray):
+  it then disconnects the VPN, restores routes and DNS, and exits. Also works when
+  the window is hidden in the tray. Waits until the app is really gone (its mutex
+  is released). False if it is still there. }
 function CloseRunningApp: Boolean;
 var
   Wnd: Longint;
+  QuitMessage: Longint;
   Waited: Integer;
 begin
+  QuitMessage := FoxyRegisterWindowMessage(AppQuitMessageName);
   Waited := 0;
   while AppIsRunning and (Waited < CloseWaitSeconds * 1000) do
   begin
@@ -165,7 +174,15 @@ begin
     begin
       Wnd := FoxyFindWindow(AppWindowClass, AppWindowTitle);
       if Wnd <> 0 then
-        FoxyPostMessage(Wnd, WM_CLOSE, 0, 0);
+      begin
+        if QuitMessage <> 0 then
+          FoxyPostMessage(Wnd, QuitMessage, 0, 0);
+        // Still there after 3 s: an older FoxyVPN (before the tray), which does
+        // not know the quit message and quits on WM_CLOSE. A current one is busy
+        // disconnecting by then and ignores the extra close.
+        if (Waited > 0) or (QuitMessage = 0) then
+          FoxyPostMessage(Wnd, WM_CLOSE, 0, 0);
+      end;
     end;
     Sleep(250);
     Waited := Waited + 250;
@@ -189,8 +206,8 @@ begin
     if not CloseRunningApp then
     begin
       SuppressibleMsgBox(
-        '{#AppName} did not close. Close it yourself (click the close button of its window, which ' +
-        'disconnects the VPN first), then run Setup again.', mbError, MB_OK, IDOK);
+        '{#AppName} did not close. Quit it yourself (right-click its icon in the notification area, then ' +
+        'Quit FoxyVPN; that disconnects the VPN first), then run Setup again.', mbError, MB_OK, IDOK);
       Result := False;
     end;
   end;
@@ -214,8 +231,8 @@ begin
     if not CloseRunningApp then
     begin
       SuppressibleMsgBox(
-        '{#AppName} did not close. Close it yourself (click the close button of its window, which ' +
-        'disconnects the VPN first), then run Uninstall again.', mbError, MB_OK, IDOK);
+        '{#AppName} did not close. Quit it yourself (right-click its icon in the notification area, then ' +
+        'Quit FoxyVPN; that disconnects the VPN first), then run Uninstall again.', mbError, MB_OK, IDOK);
       Result := False;
       Exit;
     end;
