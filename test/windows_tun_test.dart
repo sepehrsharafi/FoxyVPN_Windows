@@ -90,12 +90,47 @@ Aktive Routen:
       expect(deleteBypassRouteCmd('1.2.3.4').args, ['delete', '1.2.3.4', 'mask', '255.255.255.255']);
     });
 
+    test('bypass route is pinned to the real adapter when its index is known (Wi-Fi + Ethernet)', () {
+      final add = addBypassRouteCmd('1.2.3.4', '192.168.1.1', interfaceIndex: 12);
+      expect(add.args, ['add', '1.2.3.4', 'mask', '255.255.255.255', '192.168.1.1', 'metric', '1', 'if', '12']);
+    });
+
     test('tun2socks arguments', () {
       expect(tun2socksArgs(1080), [
         '--device', 'tun://FoxyVPN',
+        '--mtu', '1500',
         '--proxy', 'socks5://127.0.0.1:1080',
         '--loglevel', 'warn',
       ]);
+    });
+
+    test('the adapter MTU is the same on both sides, forwarding is on, nothing persistent', () {
+      final tuning = tunTuningCmds().map((c) => c.toString()).toList();
+      final v6 = tunSetupCmdsV6().map((c) => c.toString()).toList();
+      expect(tuning, [
+        'netsh interface ipv4 set subinterface interface=FoxyVPN mtu=1500 store=active',
+        'netsh interface ipv4 set interface interface=FoxyVPN forwarding=enabled store=active',
+      ]);
+      expect(v6, contains('netsh interface ipv6 set subinterface interface=FoxyVPN mtu=1500 store=active'));
+      expect(tun2socksArgs(1)[tun2socksArgs(1).indexOf('--mtu') + 1], '$tunMtu');
+      // Only our own adapter is ever touched.
+      expect([...tuning, ...v6].every((c) => c.contains('interface=FoxyVPN')), isTrue);
+      expect(() => netshScript(tunTuningCmds()), returnsNormally);
+    });
+
+    test('the bypass route is repaired when the network changed or the route is gone', () {
+      const wifi = DefaultRoute('192.168.1.1', '192.168.1.20', 35);
+      const lan = DefaultRoute('10.0.0.1', '10.0.0.5', 25);
+      const withRoute = '''
+          0.0.0.0          0.0.0.0      192.168.1.1     192.168.1.20     35
+      203.0.113.7  255.255.255.255      192.168.1.1     192.168.1.20     36
+''';
+      const withoutRoute = '''
+          0.0.0.0          0.0.0.0      192.168.1.1     192.168.1.20     35
+''';
+      expect(bypassNeedsRepair(wifi, wifi, withRoute, '203.0.113.7'), isFalse);
+      expect(bypassNeedsRepair(wifi, wifi, withoutRoute, '203.0.113.7'), isTrue, reason: 'adapter went down and up');
+      expect(bypassNeedsRepair(wifi, lan, withRoute, '203.0.113.7'), isTrue, reason: 'network changed');
     });
 
     test('tun2socks failure summary keeps only the last line, not the usage text', () {

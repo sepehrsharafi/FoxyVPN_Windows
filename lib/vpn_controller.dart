@@ -894,6 +894,11 @@ class VpnController extends ChangeNotifier {
     _connectFuture = future;
     return future.whenComplete(() {
       if (identical(_connectFuture, future)) _connectFuture = null;
+      // The conflict check (2-3 PowerShell launches, WMI and Get-NetAdapter)
+      // runs once the connect is over, not during it: then it competed with the
+      // tunnel's own PowerShell and netsh launches and with Windows creating
+      // the Wintun adapter, which all together could stall a slower PC.
+      if (!_disposed) unawaited(refreshConflicts());
     });
   }
 
@@ -914,7 +919,6 @@ class VpnController extends ChangeNotifier {
     _error = null;
     _dropped = false;
     _notify();
-    unawaited(refreshConflicts());
     VpnSession? session;
     TunBackend? tun;
     try {
