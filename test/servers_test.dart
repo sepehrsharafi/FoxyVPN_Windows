@@ -2,13 +2,17 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:foxyvpn/servers.dart';
 
 void main() {
-  test('the user agent names the platform the app runs on', () {
-    expect(mozillaVpnUserAgentFor(android: false), 'MozillaVPN/2.35.0 (sys:windows; iap:true)');
-    expect(mozillaVpnUserAgentFor(android: true), 'MozillaVPN/2.35.0 (sys:android; iap:true)');
+  test('the user agent is a generic browser user agent', () {
+    const expectedUserAgent =
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0';
+    expect(mozillaVpnUserAgentFor(android: false), expectedUserAgent);
+    expect(mozillaVpnUserAgentFor(android: true), expectedUserAgent);
   });
 
-  test('parses locations, skipping quarantined servers and excluded countries', () {
-    const raw = '''
+  test(
+    'parses locations, skipping quarantined servers and excluded countries',
+    () {
+      const raw = '''
 {"data": [
   {"country": {"name": "Sweden", "code": "se", "cities": [
     {"name": "Stockholm", "code": "sto", "servers": [
@@ -23,10 +27,11 @@ void main() {
   ]}}
 ]}
 ''';
-    final locations = parseLocations(raw);
-    expect(locations, hasLength(1));
-    expect(locations.single.label, 'Sweden, Stockholm');
-    expect(locations.single.servers.single.host, 'edge.example');
-    expect(locations.single.servers.single.port, 2499);
-  });
+      final locations = parseLocations(raw);
+      expect(locations, hasLength(1));
+      expect(locations.single.label, 'Sweden, Stockholm');
+      expect(locations.single.servers.single.host, 'edge.example');
+      expect(locations.single.servers.single.port, 2499);
+    },
+  );
 }
