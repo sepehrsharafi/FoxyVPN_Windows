@@ -2,3 +2,6 @@
 # Marked so GitHub keeps it out of language stats and collapses it in diffs.
 android/app/src/main/jni/hev-socks5-tunnel/** linguist-vendored
 third_party/** linguist-vendored
+
+# Git hooks run under sh: keep LF line endings even on Windows checkouts.
+.githooks/* text eol=lf

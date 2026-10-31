@@ -19,8 +19,10 @@ env:
   INNO_SETUP_VERSION: 6.5.4
 
 jobs:
-  windows:
-    runs-on: windows-latest
+  # Lints on a cheap Linux runner first: a lint slip fails here in about a minute
+  # instead of after a Windows runner (billed at twice the Linux rate) has started.
+  analyze:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
 
@@ -32,6 +34,20 @@ jobs:
 
       - run: flutter pub get
       - run: flutter analyze
+
+  windows:
+    needs: analyze
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.47.4
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
       - run: flutter test
       - run: flutter build windows --release
 
@@ -255,6 +271,7 @@ jobs:
           retention-days: 90 # the longest GitHub keeps them (public repo); each push makes fresh ones
 
   android:
+    needs: analyze
     runs-on: ubuntu-latest
     env:
       HAS_RELEASE_KEY: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}

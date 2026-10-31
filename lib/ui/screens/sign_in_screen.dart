@@ -1,15 +1,20 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../errors.dart' show friendlyError;
 import '../../fxa.dart' show LoginDone, LoginNeedsCode;
+import '../../platform/host.dart';
 import '../../vpn_controller.dart';
 import '../theme.dart';
 import '../widgets/app_button.dart';
 import '../widgets/fox_mark.dart';
 import '../widgets/foxy_icon.dart';
+import '../widgets/foxy_route.dart';
 import '../widgets/foxy_text_field.dart';
 import '../widgets/pressable.dart';
+import 'log_screen.dart';
 
 /// Sign in with a Firefox account; a second step takes the emailed code.
 class SignInScreen extends StatefulWidget {
@@ -34,6 +39,7 @@ class _SignInScreenState extends State<SignInScreen> {
   String? _error;
   bool _busy = false;
   bool _showPassword = false;
+  final _push = PushGuard();
 
   bool get _needsCode => _pendingSession != null;
 
@@ -105,6 +111,15 @@ class _SignInScreenState extends State<SignInScreen> {
     _focusAfterBuild(_emailFocus);
   }
 
+  /// Windows: Notepad. Android: a page in the app.
+  void _openLog() {
+    if (Host.isAndroid) {
+      unawaited(_push.push(context, (_) => const LogScreen()));
+    } else {
+      widget.controller.openLog();
+    }
+  }
+
   /// Autofocus only works on first build, and the old step is still in the tree
   /// while it fades out, so ask for focus explicitly.
   void _focusAfterBuild(FocusNode node) {
@@ -167,6 +182,12 @@ class _SignInScreenState extends State<SignInScreen> {
                       ),
                       const Spacer(),
                       const SizedBox(height: 16),
+                      // Sign-in problems (a 406 from Mozilla) are explained in the log,
+                      // so it must be reachable before there is an Account screen.
+                      Center(
+                        child: AppButton(label: 'Open log', kind: AppButtonKind.text, onPressed: _openLog),
+                      ),
+                      const SizedBox(height: 4),
                       Text(
                         'Unofficial client · not affiliated with Mozilla',
                         textAlign: TextAlign.center,

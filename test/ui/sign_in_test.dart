@@ -42,6 +42,15 @@ void main() {
     expect(c.calls, ['startLogin:me@example.com:hunter2']);
   });
 
+  testWidgets('the log can be opened before signing in', (tester) async {
+    final c = FakeVpnController()..signedIn = false;
+    await pumpApp(tester, c);
+
+    await tester.tap(find.text('Open log'));
+    await tester.pump();
+    expect(c.calls, ['openLog']);
+  });
+
   testWidgets('password can be shown and hidden', (tester) async {
     final c = FakeVpnController()..signedIn = false;
     await pumpApp(tester, c);

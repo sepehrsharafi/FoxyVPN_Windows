@@ -1,0 +1,10 @@
+#!/bin/sh
+# Runs the same `flutter analyze` as CI before anything is pushed, so a lint slip
+# fails here in seconds instead of on GitHub. Enable once per clone with:
+#   git config core.hooksPath .githooks
+# Skip in an emergency with: git push --no-verify
+echo "pre-push: flutter analyze"
+if ! flutter analyze; then
+  echo "pre-push: flutter analyze found issues; fix them (CI would fail) or push with --no-verify." >&2
+  exit 1
+fi
