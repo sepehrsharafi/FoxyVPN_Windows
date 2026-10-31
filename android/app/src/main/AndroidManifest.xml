@@ -41,6 +41,12 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- Long-pressing the Quick Settings tile opens the activity that handles
+                 this action (API 24+); without it Android shows the App info page.
+                 The intent has no quick-connect extra, so it only opens the app. -->
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE_PREFERENCES" />
+            </intent-filter>
         </activity>
 
         <!-- The VPN. The android.net.VpnService intent filter is what lets Android
@@ -62,8 +68,9 @@
         </service>
 
         <!-- Quick Settings tile: tap to connect to the fastest location, tap again to
-             disconnect. Passive on purpose (no ACTIVE_TILE): the system binds it each
-             time the panel opens, so the state shown is always read fresh. -->
+             disconnect, long-press to open the app (QS_TILE_PREFERENCES on MainActivity).
+             Passive on purpose (no ACTIVE_TILE): the system binds it each time the
+             panel opens, so the state shown is always read fresh. -->
         <service
             android:name=".vpn.FoxyTileService"
             android:exported="true"

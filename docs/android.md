@@ -23,7 +23,7 @@ used this session, without having to expand it. Expand it for **Disconnect**.
 
 FoxyVPN has a tile for the quick settings panel. Tap it while the VPN is off to connect to the
 fastest location (every location is pinged first; the lowest ping wins), and tap it again to
-disconnect. Signed out, it reads "Sign in first".
+disconnect. Long-press it to open the FoxyVPN app. Signed out, it reads "Sign in first".
 
 To add it on a Xiaomi phone (HyperOS / MIUI), pull down the **Control Center** (swipe down from the
 top right), tap the **pencil** icon, and drag **FoxyVPN** into the active tiles. On other phones,

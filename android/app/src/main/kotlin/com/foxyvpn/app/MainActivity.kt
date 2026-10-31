@@ -49,7 +49,10 @@ class MainActivity : FlutterFragmentActivity() {
         handleQuickConnectIntent(intent)
     }
 
-    /** The tile opened the app because the VPN permission is missing: connect once it is granted. */
+    /**
+     * The tile opened the app because the VPN permission is missing: connect once it is granted.
+     * Other intents (launcher, long-press on the tile via QS_TILE_PREFERENCES) just show the app.
+     */
     private fun handleQuickConnectIntent(intent: Intent?) {
         if (intent?.getBooleanExtra(EXTRA_QUICK_CONNECT, false) != true) return
         intent.removeExtra(EXTRA_QUICK_CONNECT)
