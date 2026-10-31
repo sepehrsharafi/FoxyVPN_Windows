@@ -88,14 +88,26 @@ Uint8List encodeCapsule(int type, List<int> value) {
   return out.takeBytes();
 }
 
-/// A DATAGRAM capsule carrying [payload] (context ID 0).
+/// A DATAGRAM capsule carrying [payload] (context ID 0). Built for every
+/// datagram, so it goes straight into one exactly sized buffer.
 Uint8List encodeDatagramCapsule(List<int> payload) {
-  final out = BytesBuilder(copy: false);
-  writeVarint(out, datagramCapsuleType);
-  writeVarint(out, payload.length + 1);
-  out.addByte(0); // context ID 0: plain UDP payload
-  out.add(payload);
-  return out.takeBytes();
+  final length = payload.length + 1; // context ID + payload
+  final lengthBytes = varintLength(length);
+  final out = Uint8List(1 + lengthBytes + length);
+  // out[0]: capsule type 0x00 (DATAGRAM), a 1-byte varint.
+  final prefix = switch (lengthBytes) {
+    1 => 0x00,
+    2 => 0x40,
+    4 => 0x80,
+    _ => 0xc0,
+  };
+  for (var i = 0; i < lengthBytes; i++) {
+    out[1 + i] = (length >> (8 * (lengthBytes - 1 - i))) & 0xff;
+  }
+  out[1] |= prefix;
+  // out[1 + lengthBytes]: context ID 0, plain UDP payload.
+  out.setRange(2 + lengthBytes, out.length, payload);
+  return out;
 }
 
 /// The UDP payload of a DATAGRAM capsule with context ID 0; null for any other
@@ -149,10 +161,13 @@ class CapsuleParser {
         break;
       }
       if (available < size) break;
-      out.add(Capsule(type.$1, Uint8List.fromList(buffer.sublist(bodyStart, bodyStart + size))));
+      // A view: the caller uses it right away (it is copied into the reply
+      // datagram), so copying every capsule out first was wasted work.
+      out.add(Capsule(type.$1, Uint8List.sublistView(buffer, bodyStart, bodyStart + size)));
       pos = bodyStart + size;
     }
-    _buffer = pos >= buffer.length ? Uint8List(0) : Uint8List.fromList(buffer.sublist(pos));
+    // The incomplete rest is copied: it must not keep the whole chunk alive.
+    _buffer = pos >= buffer.length ? Uint8List(0) : Uint8List.fromList(Uint8List.sublistView(buffer, pos));
     return out;
   }
 }
@@ -190,8 +205,11 @@ class UdpRejectionCache {
 
   static String keyFor(String host, int port) => '${host.toLowerCase()}:$port';
 
-  bool isRejected(String host, int port) {
-    final key = keyFor(host, port);
+  bool isRejected(String host, int port) => isRejectedKey(keyFor(host, port));
+
+  /// [isRejected] by a [keyFor] key the caller already has.
+  bool isRejectedKey(String key) {
+    if (_until.isEmpty) return false;
     final until = _until[key];
     if (until == null) return false;
     if (until.isAfter(_now())) return true;
@@ -217,6 +235,13 @@ class UdpRejectionCache {
 // ---------------------------------------------------------------------------
 
 typedef UdpDial = Future<TunnelStream> Function(String host, int port);
+
+/// A SOCKS5 UDP reply: [header] (as the client sent it) followed by [payload],
+/// in one buffer (built for every datagram).
+Uint8List withSocksHeader(Uint8List header, List<int> payload) =>
+    Uint8List(header.length + payload.length)
+      ..setRange(0, header.length, header)
+      ..setRange(header.length, header.length + payload.length, payload);
 
 /// Sends a SOCKS5 UDP reply datagram (header + payload) back to the client.
 typedef UdpDeliver = void Function(Uint8List datagram, InternetAddress address, int port);
@@ -257,6 +282,7 @@ class _Flow {
   /// Bytes in [outbox] that the stream has not taken yet.
   int queuedBytes = 0;
   Timer? idle;
+  int lastActive = 0; // UdpRelay._clock, microseconds
   bool closed = false;
 }
 
@@ -298,8 +324,9 @@ class UdpRelay {
     required InternetAddress clientAddress,
     required int clientPort,
   }) {
-    if (_closed || rejections.isRejected(host, port)) return;
+    if (_closed) return;
     final key = UdpRejectionCache.keyFor(host, port);
+    if (rejections.isRejectedKey(key)) return;
     var flow = _flows[key];
     if (flow == null) {
       if (_flows.length >= maxFlows) return;
@@ -378,11 +405,7 @@ class UdpRelay {
           if (payload == null || flow.closed) continue;
           _touch(flow, key);
           onDown?.call(payload.length);
-          deliver(
-            Uint8List.fromList([...flow.header, ...payload]),
-            flow.clientAddress,
-            flow.clientPort,
-          );
+          deliver(withSocksHeader(flow.header, payload), flow.clientAddress, flow.clientPort);
         }
       },
       onError: (Object _) => _closeFlow(flow, key),
@@ -396,9 +419,27 @@ class UdpRelay {
     }
   }
 
+  /// Monotonic clock for the idle checks.
+  static final _clock = Stopwatch()..start();
+
+  /// Marks [flow] as active. Runs for every datagram both ways, so it only
+  /// stores the time: the one idle timer per flow re-arms itself for the
+  /// remainder when it fires early, instead of a Timer being cancelled and
+  /// created for every packet.
   void _touch(_Flow flow, String key) {
-    flow.idle?.cancel();
-    flow.idle = Timer(idleTimeout, () => _closeFlow(flow, key));
+    flow.lastActive = _clock.elapsedMicroseconds;
+    flow.idle ??= Timer(idleTimeout, () => _checkIdle(flow, key));
+  }
+
+  void _checkIdle(_Flow flow, String key) {
+    flow.idle = null;
+    if (flow.closed) return;
+    final left = idleTimeout.inMicroseconds - (_clock.elapsedMicroseconds - flow.lastActive);
+    if (left <= 0) {
+      _closeFlow(flow, key);
+    } else {
+      flow.idle = Timer(Duration(microseconds: left), () => _checkIdle(flow, key));
+    }
   }
 
   void _closeFlow(_Flow flow, String key) {
