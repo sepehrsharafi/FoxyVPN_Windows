@@ -141,15 +141,16 @@ class ControlPlane {
 /// Cookies the servers hand out, kept for the app's lifetime (in memory only) and
 /// sent back the way a browser would. The edge in front of Firefox Accounts gives
 /// its "passed the check" cookie this way ([passEdgeChallenge]); a client that
-/// forgets it is judged from scratch on every request. Cookies are scoped to the
-/// site (last two labels of the host), so the one earned on accounts.firefox.com
-/// is also sent to api.accounts.firefox.com. They belong to the app as a client,
-/// not to an account, so signing out keeps them.
+/// forgets it is judged from scratch on every request. Cookies keep the domain
+/// and path the server gave them, as in a browser. They belong to the app as a
+/// client, not to an account, so signing out keeps them.
 class CookieJar {
-  CookieJar._();
+  CookieJar();
 
-  /// site -> cookie name -> (value, expiry; null lasts until the app exits).
-  static final Map<String, Map<String, ({String value, DateTime? expires})>> _bySite = {};
+  /// The app's cookies, sent with every request.
+  static final shared = CookieJar();
+
+  final List<StoredCookie> _cookies = [];
 
   /// firefox.com for api.accounts.firefox.com; IP addresses and single labels as is.
   static String siteOf(String host) {
@@ -158,11 +159,12 @@ class CookieJar {
     return labels.length <= 2 ? labels.join('.') : labels.sublist(labels.length - 2).join('.');
   }
 
-  /// Takes the raw Set-Cookie values. Parsed by hand: Dart's [Cookie] rejects
-  /// value characters that real edges do send.
-  static void store(Uri uri, List<String> setCookies, {DateTime? now}) {
+  /// Takes the raw Set-Cookie values of a response from [uri], scoped the way a
+  /// browser scopes them (Domain, else this host only; Path). Parsed by hand:
+  /// Dart's [Cookie] rejects value characters that real edges do send.
+  void store(Uri uri, List<String> setCookies, {DateTime? now}) {
     final at = now ?? DateTime.now();
-    final site = _bySite.putIfAbsent(siteOf(uri.host), () => {});
+    final host = uri.host.toLowerCase();
     for (final line in setCookies) {
       final parts = line.split(';');
       final eq = parts.first.indexOf('=');
@@ -170,62 +172,146 @@ class CookieJar {
       final name = parts.first.substring(0, eq).trim();
       final value = parts.first.substring(eq + 1).trim();
       DateTime? expires;
+      var maxAge = false;
+      String? domain;
+      String? path;
       for (final attribute in parts.skip(1)) {
         final i = attribute.indexOf('=');
         if (i < 0) continue;
         final key = attribute.substring(0, i).trim().toLowerCase();
         final v = attribute.substring(i + 1).trim();
-        if (key == 'max-age') {
-          final seconds = int.tryParse(v);
-          if (seconds != null) expires = at.add(Duration(seconds: seconds));
-          break; // Max-Age wins over Expires.
-        }
-        if (key == 'expires') {
-          try {
-            expires = HttpDate.parse(v);
-          } catch (_) {}
+        switch (key) {
+          case 'max-age':
+            final seconds = int.tryParse(v);
+            if (seconds != null) {
+              expires = at.add(Duration(seconds: seconds));
+              maxAge = true; // Max-Age wins over Expires.
+            }
+          case 'expires' when !maxAge:
+            try {
+              expires = HttpDate.parse(v);
+            } catch (_) {}
+          case 'domain' when v.isNotEmpty:
+            domain = (v.startsWith('.') ? v.substring(1) : v).toLowerCase();
+          case 'path' when v.startsWith('/'):
+            path = v;
         }
       }
-      if (expires != null && !expires.isAfter(at)) {
-        site.remove(name);
-      } else {
-        site[name] = (value: value, expires: expires);
-      }
+      // A Domain the host is not inside is refused, as browsers do.
+      if (domain != null && host != domain && !host.endsWith('.$domain')) continue;
+      add(
+        StoredCookie(
+          name: name,
+          value: value,
+          domain: domain ?? host,
+          hostOnly: domain == null,
+          path: path ?? _defaultPath(uri.path),
+          expires: expires,
+        ),
+        now: at,
+      );
     }
   }
 
-  /// The Cookie header for [uri], or null when there is nothing to send.
-  static String? headerFor(Uri uri, {DateTime? now}) {
-    final site = _bySite[siteOf(uri.host)];
-    if (site == null) return null;
-    final at = now ?? DateTime.now();
-    site.removeWhere((_, c) => c.expires != null && !c.expires!.isAfter(at));
-    if (site.isEmpty) return null;
-    return [for (final e in site.entries) '${e.key}=${e.value.value}'].join('; ');
+  /// Puts [cookie] in, replacing the one with the same name, domain and path
+  /// (an expired one only removes it).
+  void add(StoredCookie cookie, {DateTime? now}) {
+    _cookies.removeWhere((c) => c.name == cookie.name && c.domain == cookie.domain && c.path == cookie.path);
+    if (!cookie.expiredAt(now ?? DateTime.now())) _cookies.add(cookie);
   }
 
-  static void clear() => _bySite.clear();
+  /// The cookies a request to [uri] carries.
+  List<StoredCookie> cookiesFor(Uri uri, {DateTime? now}) {
+    final at = now ?? DateTime.now();
+    _cookies.removeWhere((c) => c.expiredAt(at));
+    return [for (final c in _cookies) if (c.appliesTo(uri)) c];
+  }
+
+  /// The Cookie header for [uri], or null when there is nothing to send.
+  String? headerFor(Uri uri, {DateTime? now}) {
+    final cookies = cookiesFor(uri, now: now);
+    return cookies.isEmpty ? null : [for (final c in cookies) '${c.name}=${c.value}'].join('; ');
+  }
+
+  void clear() => _cookies.clear();
+
+  static String _defaultPath(String requestPath) {
+    final slash = requestPath.lastIndexOf('/');
+    return slash <= 0 ? '/' : requestPath.substring(0, slash);
+  }
 }
 
-/// The browser the edge challenge is answered as (the one NAT-on-steroids uses).
-const challengeUserAgent =
+class StoredCookie {
+  StoredCookie({
+    required this.name,
+    required this.value,
+    required this.domain,
+    required this.hostOnly,
+    required this.path,
+    this.expires,
+  });
+
+  final String name;
+  final String value;
+  final String domain;
+
+  /// Set without a Domain attribute: sent to exactly [domain], not its subdomains.
+  final bool hostOnly;
+  final String path;
+
+  /// Null lasts until the app exits.
+  final DateTime? expires;
+
+  bool expiredAt(DateTime at) => expires != null && !expires!.isAfter(at);
+
+  bool appliesTo(Uri uri) {
+    final host = uri.host.toLowerCase();
+    final hostOk = hostOnly ? host == domain : host == domain || host.endsWith('.$domain');
+    final requestPath = uri.path.isEmpty ? '/' : uri.path;
+    final pathOk = requestPath == path ||
+        (requestPath.startsWith(path) && (path.endsWith('/') || requestPath[path.length] == '/'));
+    return hostOk && pathOk;
+  }
+}
+
+/// The browser identity of every Firefox Accounts request and of the edge
+/// challenge they may run into. The edge ties the cookie a passed challenge
+/// earns to the identity that earned it, so the retry must look the same:
+/// answering as Chrome but retrying as MozillaVPN gets HTTP 406 again. As
+/// NAT-on-steroids (windows-private, "Fix account challenge identity mismatch").
+const accountUserAgent =
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
 
-/// Sends with the MozillaVPN user agent unless [userAgent] is given. A 406 from the edge gets its challenge answered
-/// ([passEdgeChallenge]) and the request is sent once more; only a second 406,
-/// or a challenge the app cannot answer, becomes [BrowserCheckRequired].
+/// Sends with the MozillaVPN user agent unless [userAgent] is given.
+///
+/// With [edgeChallenge] (Firefox Accounts), an HTTP 406 from the edge itself
+/// (no API error in its body) gets the edge's challenge answered as the same
+/// client ([passEdgeChallenge]) and the request is sent once more; a second 406,
+/// or a challenge that cannot be completed, becomes [BrowserCheckRequired].
 Future<JsonResponse> sendJson(String method, Uri uri,
-    {List<int>? body, Map<String, String> headers = const {}, String? userAgent}) async {
+    {List<int>? body, Map<String, String> headers = const {}, String? userAgent, bool edgeChallenge = false}) async {
   final agent = userAgent ?? mozillaVpnUserAgent;
   var response = await _send(method, uri, body: body, headers: headers, userAgent: agent);
   if (response.statusCode != 406) return response;
   logRefusedResponse(method, uri, response.statusCode, response.headers, response.body);
-  // The challenge is a browser page, so it is answered as a browser, as
-  // NAT-on-steroids and the Android client do; cookies and route stay shared.
+  // A 406 the API itself sent (errno / message) is its answer, not the edge's.
+  if (_isApiError(response.body)) return response;
+  if (!edgeChallenge) throw BrowserCheckRequired(uri.host);
+  // Solved with no cookies of ours: an old completion cookie can hide the
+  // challenge page. Only the completion cookie it earns is then kept, with the
+  // scope the edge gave it.
+  final fresh = CookieJar();
   final passed = await passEdgeChallenge(
     uri,
     (m, u, {List<int>? body, Map<String, String> headers = const {}}) =>
-        _send(m, u, body: body, headers: headers, userAgent: challengeUserAgent, accept: '*/*'),
+        _send(m, u, body: body, headers: headers, userAgent: agent, accept: '*/*', jar: fresh),
+    onPassed: () {
+      final completion = [for (final c in fresh.cookiesFor(uri)) if (c.name.startsWith('_fs_ch_cp_')) c];
+      for (final c in completion) {
+        CookieJar.shared.add(c);
+      }
+      return completion.isNotEmpty;
+    },
   );
   if (passed) {
     // The edge refused the first attempt before Mozilla saw it, so resending the
@@ -237,15 +323,26 @@ Future<JsonResponse> sendJson(String method, Uri uri,
   throw BrowserCheckRequired(uri.host);
 }
 
+bool _isApiError(String body) {
+  try {
+    final data = jsonDecode(body);
+    return data is Map && (data['errno'] != null || (data['message'] is String && data['message'] != ''));
+  } catch (_) {
+    return false;
+  }
+}
+
 Future<JsonResponse> _send(String method, Uri uri,
     {List<int>? body,
     Map<String, String> headers = const {},
     required String userAgent,
-    String accept = 'application/json'}) async {
+    String accept = 'application/json',
+    CookieJar? jar}) async {
+  final cookies = jar ?? CookieJar.shared;
   final requestHeaders = {
     'user-agent': userAgent,
     'accept': accept,
-    'cookie': ?CookieJar.headerFor(uri),
+    'cookie': ?cookies.headerFor(uri),
     for (final e in headers.entries) e.key.toLowerCase(): e.value,
     // The raw type, so nothing appends "; charset=utf-8" (Hawk signs the exact type).
     if (body != null) 'content-type': 'application/json',
@@ -256,7 +353,7 @@ Future<JsonResponse> _send(String method, Uri uri,
   } else {
     response = await _sendH1(method, uri, requestHeaders, body);
   }
-  if (response.headers['set-cookie'] case final setCookies?) CookieJar.store(uri, setCookies);
+  if (response.headers['set-cookie'] case final setCookies?) cookies.store(uri, setCookies);
   return response;
 }
 

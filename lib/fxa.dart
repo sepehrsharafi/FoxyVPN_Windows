@@ -145,7 +145,7 @@ class FxaClient {
       {String? sessionToken}) async {
     final uri = Uri.parse('$_authServer$path');
     final body = utf8.encode(jsonEncode(json));
-    final response = await sendJson('POST', uri, body: body, headers: {
+    final response = await sendJson('POST', uri, body: body, userAgent: accountUserAgent, edgeChallenge: true, headers: {
       if (sessionToken != null) 'authorization': hawkHeader('POST', uri, sessionToken, body),
     });
     if (response.statusCode >= 400) {

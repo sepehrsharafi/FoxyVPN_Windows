@@ -34,7 +34,7 @@ SecurityContext _serverContext() => SecurityContext()
 
 void main() {
   setUp(() {
-    CookieJar.clear();
+    CookieJar.shared.clear();
     ControlPlane.securityContext = SecurityContext(withTrustedRoots: false)
       ..setTrustedCertificatesBytes(utf8.encode(_cert));
   });
@@ -42,7 +42,7 @@ void main() {
   tearDown(() {
     ControlPlane.reset();
     ControlPlane.securityContext = null;
-    CookieJar.clear();
+    CookieJar.shared.clear();
   });
 
   group('over HTTP/2', () {
@@ -150,6 +150,6 @@ void main() {
     expect(response.statusCode, 200);
     expect(response.body, '{"ok":true}');
     expect(versions, ['1.1']);
-    expect(CookieJar.headerFor(uri), 'old=1');
+    expect(CookieJar.shared.headerFor(uri), 'old=1');
   });
 }

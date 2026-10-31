@@ -30,20 +30,22 @@ const _maxRounds = 3;
 /// One solve per site at a time; requests refused meanwhile wait for its result.
 final Map<String, Future<bool>> _solving = {};
 
-/// Answers the edge's challenge for the site of [refused]. True when the edge
-/// accepted the answers, so a retry should pass. Never throws.
-Future<bool> passEdgeChallenge(Uri refused, ChallengeFetch fetch) {
+/// Answers the edge's challenge for the site of [refused]. A "success" from the
+/// edge alone is not enough: [onPassed] then keeps the completion cookie and
+/// says whether there was one for [refused]'s host. True when both held, so a
+/// retry should pass. Never throws.
+Future<bool> passEdgeChallenge(Uri refused, ChallengeFetch fetch, {required bool Function() onPassed}) {
   final site = CookieJar.siteOf(refused.host);
   final running = _solving[site];
   if (running != null) return running;
   // A block body: whenComplete would wait on a returned future, here the solve itself.
-  final solve = _solve(refused, site, fetch).whenComplete(() {
+  final solve = _solve(refused, site, fetch, onPassed).whenComplete(() {
     _solving.remove(site);
   });
   return _solving[site] = solve;
 }
 
-Future<bool> _solve(Uri refused, String site, ChallengeFetch fetch) async {
+Future<bool> _solve(Uri refused, String site, ChallengeFetch fetch, bool Function() onPassed) async {
   final origins = <String>{
     Uri(scheme: refused.scheme, host: refused.host, port: refused.port).origin,
     // The API host does not always serve the challenge page; the web host does.
@@ -54,7 +56,11 @@ Future<bool> _solve(Uri refused, String site, ChallengeFetch fetch) async {
       final outcome = await _solveAt(origin, fetch);
       if (outcome == null) continue;
       AppLog.write('Edge challenge at $origin: $outcome');
-      if (outcome == 'passed') return true;
+      if (outcome == 'passed') {
+        if (onPassed()) return true;
+        AppLog.write('Edge challenge at $origin: no completion cookie for ${refused.host}');
+        continue;
+      }
       if (outcome.startsWith('not answerable')) return false;
     } catch (e) {
       AppLog.write('Edge challenge at $origin failed: $e');
