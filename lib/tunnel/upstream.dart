@@ -239,7 +239,10 @@ class UpstreamSession {
     }
 
     final status = Completer<List<Header>>();
-    final incoming = StreamController<List<int>>();
+    // Synchronous: the HTTP/2 layer already delivers asynchronously, a second
+    // asynchronous hop only cost a microtask per DATA frame (per datagram for
+    // UDP flows).
+    final incoming = StreamController<List<int>>(sync: true);
     late final StreamSubscription<StreamMessage> sub;
 
     void finish([Object? error]) {
