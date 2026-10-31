@@ -379,6 +379,20 @@ void main() {
       expect(catchBlock.indexOf('await extras'), lessThan(catchBlock.indexOf('tun.stop()')));
     });
 
+    test('the wait for the adapter asks iphlpapi off the UI isolate before netsh', () {
+      final wait = source.substring(source.indexOf('Future<int> _waitForAdapter()'));
+      final body = wait.substring(0, wait.indexOf('/// Undoes everything.'));
+      expect(body.indexOf('_tunInterfaceIndex()'), greaterThan(0));
+      expect(body.indexOf('_tunInterfaceIndex()'), lessThan(body.indexOf("'show', 'interfaces'")));
+      expect(source, contains('Isolate.run(() => _interfaceIndexByAliasSync(tunName))'));
+    });
+
+    test('the Wintun driver record is made once per app run, the MTU/forwarding step is best effort', () {
+      expect(start, contains('if (!_driverStateRecorded) _driverStateRecorded = await recordWintunDriverState'));
+      expect(start, contains('_runNetsh(tunTuningCmds())'));
+      expect(start, isNot(contains('throw TunError(tuning')));
+    });
+
     test('no PowerShell on the happy path of connecting except the one DNS launch', () {
       expect(start, isNot(contains('interfaceIndexCmd')));
       expect(start, isNot(contains('dnsCleanupTaskRegisterCmd')));

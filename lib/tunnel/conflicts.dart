@@ -1,6 +1,7 @@
 // Detects (read-only, never changes anything) other things on the PC that can
 // make traffic skip or fight with FoxyVPN:
 //  * the Windows system proxy (WinINet) or a proxy script (PAC),
+//  * the machine-wide WinHTTP proxy (`netsh winhttp set proxy`),
 //  * HTTP_PROXY / HTTPS_PROXY / ALL_PROXY variables,
 //  * other VPN adapters that are connected.
 // The result is a list of short, plain-English warnings for the UI. The parsers
@@ -139,6 +140,27 @@ SystemProxy parseInternetSettings(String regOutput) {
     servers: enabled && server != null ? parseProxyServer(server) : const [],
     pacUrl: pac == null || pac.isEmpty ? null : pac,
   );
+}
+
+/// WinHTTP's own proxy (`netsh winhttp set proxy`), machine-wide and separate
+/// from the WinINet system proxy: used by winget, Windows Update, BITS and
+/// other services and command-line tools.
+const winHttpSettingsKey = r'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings\Connections';
+const winHttpSettingsValue = 'WinHttpSettings';
+
+/// The proxy servers in the WinHttpSettings REG_BINARY (as reg.exe prints it,
+/// hex): DWORD size, DWORD counter, DWORD flags (2 = use a proxy), DWORD
+/// length + the proxy list (ANSI), then the bypass list. Empty for "direct
+/// access" (`1800000000000000010000000000000000000000`) or anything unreadable.
+List<ProxyEndpoint> parseWinHttpSettings(String regOutput) {
+  final hex = parseRegQuery(regOutput)[winHttpSettingsValue]?.trim() ?? '';
+  if (hex.length < 32 || hex.length.isOdd || !RegExp(r'^[0-9A-Fa-f]+$').hasMatch(hex)) return const [];
+  final bytes = [for (var i = 0; i < hex.length; i += 2) int.parse(hex.substring(i, i + 2), radix: 16)];
+  int dword(int at) => bytes[at] | bytes[at + 1] << 8 | bytes[at + 2] << 16 | bytes[at + 3] << 24;
+  if (dword(8) & 2 == 0) return const [];
+  final length = dword(12);
+  if (length <= 0 || 16 + length > bytes.length) return const [];
+  return parseProxyServer(String.fromCharCodes(bytes.sublist(16, 16 + length)));
 }
 
 /// HTTP_PROXY, HTTPS_PROXY and ALL_PROXY (any case, non-empty) from a
@@ -284,6 +306,7 @@ List<VpnAdapter> parseVpnAdapters(String output) {
 /// Turns what was found into the sentences shown to the user.
 List<String> buildConflicts({
   SystemProxy systemProxy = const SystemProxy(),
+  List<ProxyEndpoint> winHttpProxies = const [],
   Map<String, String> envProxies = const {},
   List<VpnAdapter> vpnAdapters = const [],
   Map<int, ProcessInfo> listeners = const {},
@@ -316,6 +339,16 @@ List<String> buildConflicts({
     out.add(
       'Windows is set to use a proxy script ($pac). Apps that follow it may skip FoxyVPN. '
       'Turn off "Use setup script" in Windows proxy settings while using FoxyVPN.',
+    );
+  }
+
+  for (final server in winHttpProxies) {
+    if (systemProxy.servers.contains(server)) continue; // already said above
+    final who = owner(server);
+    out.add(
+      'The Windows WinHTTP proxy points to ${server.text}${who == null ? '' : ' ($who)'}. '
+      'Windows services and tools that use it (winget, Windows Update) send their traffic there. '
+      'Reset it with "netsh winhttp reset proxy" while using FoxyVPN.',
     );
   }
 
@@ -414,8 +447,10 @@ class ConflictDetector {
       safe(reg, ['query', userRegistryKey(_userEnvironmentSubkey, sid: sid)]),
       safe(reg, ['query', _machineEnvironmentKey]),
       adapters,
+      safe(reg, ['query', winHttpSettingsKey, '/v', winHttpSettingsValue]),
     ]);
     final systemProxy = parseInternetSettings(results[0]);
+    final winHttpProxies = parseWinHttpSettings(results[4]);
     final envProxies = <String, String>{
       ...proxyEnvVars(parseRegQuery(results[2])),
       ...proxyEnvVars(parseRegQuery(results[1])),
@@ -424,7 +459,7 @@ class ConflictDetector {
 
     // Who listens on the loopback proxy ports.
     final ports = <int>{
-      for (final s in systemProxy.servers)
+      for (final s in [...systemProxy.servers, ...winHttpProxies])
         if (s.isLoopback && s.port != null) s.port!,
       for (final v in envProxies.values)
         if (parseProxyEndpoint(v) case final e? when e.isLoopback && e.port != null) e.port!,
@@ -435,6 +470,7 @@ class ConflictDetector {
 
     return buildConflicts(
       systemProxy: systemProxy,
+      winHttpProxies: winHttpProxies,
       envProxies: envProxies,
       vpnAdapters: parseVpnAdapters(results[3]),
       listeners: listeners,

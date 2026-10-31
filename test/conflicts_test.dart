@@ -14,7 +14,40 @@ HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Internet Settings
 HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Internet Settings\Connections
 ''';
 
+// `netsh winhttp set proxy 10.1.1.1:3128 "<local>"` as reg.exe prints it.
+const _winHttpProxy = r'''
+
+HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings\Connections
+    WinHttpSettings    REG_BINARY    2800000005000000030000000D00000031302E312E312E313A33313238070000003C6C6F63616C3E
+
+''';
+
 void main() {
+  group('parseWinHttpSettings', () {
+    test('a WinHTTP proxy', () {
+      expect(parseWinHttpSettings(_winHttpProxy).map((e) => e.text), ['10.1.1.1:3128']);
+    });
+
+    test('direct access (netsh winhttp reset proxy), missing or broken values give nothing', () {
+      expect(
+        parseWinHttpSettings('    WinHttpSettings    REG_BINARY    1800000000000000010000000000000000000000\n'),
+        isEmpty,
+      );
+      expect(parseWinHttpSettings(''), isEmpty);
+      expect(parseWinHttpSettings('    WinHttpSettings    REG_BINARY    28000000050000000300\n'), isEmpty);
+      // The length points past the end.
+      expect(parseWinHttpSettings('    WinHttpSettings    REG_BINARY    28000000050000000300000040000000313031\n'), isEmpty);
+      expect(parseWinHttpSettings('    WinHttpSettings    REG_BINARY    zz00000005000000030000000D000000\n'), isEmpty);
+    });
+
+    test('a WinHTTP proxy that is also the system proxy is reported once', () {
+      final same = parseProxyServer('127.0.0.1:10809');
+      final out = buildConflicts(systemProxy: SystemProxy(servers: same), winHttpProxies: same);
+      expect(out, hasLength(1));
+      expect(buildConflicts(winHttpProxies: same).single, contains('netsh winhttp reset proxy'));
+    });
+  });
+
   group('parseRegQuery', () {
     test('values with spaces in name and data, empty data, and sub keys ignored', () {
       final values = parseRegQuery(_internetSettings);
@@ -273,6 +306,10 @@ HKEY_CURRENT_USER\Environment
         final text = args.join(' ');
         if (exe.toLowerCase().endsWith('reg.exe')) {
           expect(args.first, 'query');
+          if (text.contains('WinHttpSettings')) {
+            expect(text, startsWith(r'query HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings\Connections'));
+            return _winHttpProxy;
+          }
           if (text.contains('Internet Settings')) {
             expect(text, contains(r'HKU\S-1-5-21-1-2-3-1001\Software'), reason: 'the interactive user, not the elevated one');
             return _internetSettings;
@@ -294,11 +331,12 @@ HKEY_CURRENT_USER\Environment
       }
 
       final out = await ConflictDetector.detect(run: run, environment: {'ALL_PROXY': 'socks5://10.9.9.9:1080'});
-      expect(out, hasLength(4));
+      expect(out, hasLength(5));
       expect(out[0], contains('xray.exe from Happ'));
-      expect(out[1], contains('HTTPS_PROXY'));
-      expect(out[2], contains('ALL_PROXY'));
-      expect(out[3], contains('wg0'));
+      expect(out[1], allOf(contains('WinHTTP'), contains('10.1.1.1:3128')));
+      expect(out[2], contains('HTTPS_PROXY'));
+      expect(out[3], contains('ALL_PROXY'));
+      expect(out[4], contains('wg0'));
       for (final c in calls) {
         expect(c, isNot(contains(RegExp(r'\b(add|delete|set|Set-|Remove-|New-)\b'))), reason: c);
       }
@@ -309,7 +347,7 @@ HKEY_CURRENT_USER\Environment
       final keys = <String>[];
       await ConflictDetector.detect(
         run: (exe, args) async {
-          if (exe.toLowerCase().endsWith('reg.exe')) keys.add(args.last);
+          if (exe.toLowerCase().endsWith('reg.exe')) keys.add(args[1]);
           return '';
         },
         environment: const {},
@@ -318,6 +356,7 @@ HKEY_CURRENT_USER\Environment
         r'HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings',
         r'HKCU\Environment',
         r'HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment',
+        winHttpSettingsKey, // machine-wide, the same for every user
       ]);
     });
 

@@ -34,6 +34,10 @@
 //    Windows asks them first, and the queries travel through the tunnel. A
 //    catch-all NRPT rule (namespace ".") also forces every name to those
 //    servers, so Windows cannot fall back to another adapter's DNS.
+//  * WSL 2, Docker and Hyper-V VMs behind the host's NAT follow the same /1
+//    routes. For them the adapter has an MTU of [tunMtu] on both sides and
+//    IPv4 forwarding on ([tunTuningCmds]); see "WSL, Docker and the terminal"
+//    in docs/windows.md.
 //
 // Routes are non-persistent (`store=active`, `route add` without -p). The NRPT
 // rule lives in the registry, so it is tagged with a comment, recorded in the
@@ -46,7 +50,10 @@
 //  * connect: the netsh commands of a step go into ONE netsh session fed through
 //    stdin (no script file, see [netshScript]); the safety-net task and the NRPT
 //    rule are ONE PowerShell launch that runs while the adapter comes up; the
-//    adapter's interface index comes from dart:io, not PowerShell;
+//    adapter's interface index comes from dart:io, not PowerShell; the wait for
+//    the adapter (many seconds while Windows installs the Wintun driver) asks
+//    iphlpapi in a separate isolate instead of starting netsh in a loop; the
+//    Wintun driver record (icacls, reg) is made once per app run;
 //  * disconnect ([WindowsTun.stop]): tun2socks is killed FIRST, which makes
 //    Windows remove the adapter and with it its address and routes, so those are
 //    not deleted one by one; then the routes on the real adapter, the DNS rule +
@@ -69,6 +76,17 @@ const tunName = 'FoxyVPN';
 const tunAddress = '198.18.0.1';
 const tunMask = '255.254.0.0'; // 198.18.0.0/15 (benchmark range, never used on real networks)
 const tunDnsServers = ['1.1.1.1', '1.0.0.1'];
+
+/// MTU of the adapter, on both sides: tun2socks' packet stack (`--mtu`) and
+/// Windows' IP interface ([tunTuningCmds]). tun2socks ends every TCP connection
+/// itself and carries only the payload over its own HTTPS connection, so no
+/// tunnel overhead has to fit in here: plain Ethernet size is right. Left
+/// alone, tun2socks' Wintun device uses 1420 while Windows keeps its own (larger)
+/// interface MTU, so a full-size 1500-byte packet - above all one that WSL,
+/// Docker or a Hyper-V VM sends through the host's NAT, which cannot be
+/// fragmented (DF) and whose "too big" answer does not make it back through the
+/// NAT - was cut off and lost instead of carried (a PMTU black hole).
+const tunMtu = 1500;
 
 /// The adapter's IPv6 address: a unique-local address (fc00::/7) from a prefix
 /// of our own (not Tailscale's fd7a:115c:a1e0::/48 or any common LAN range).
@@ -155,6 +173,16 @@ DefaultRoute? parseDefaultRoute(String routePrint) {
 bool bypassNeedsRefresh(DefaultRoute current, DefaultRoute latest) =>
     current.gateway != latest.gateway || current.interfaceIp != latest.interfaceIp;
 
+/// Before a reconnect: the server's /32 route must be put back when the network
+/// changed, but also when the route itself is gone while the default route
+/// looks the same (the cable was re-plugged, Wi-Fi rejoined the same network:
+/// Windows drops the non-persistent routes of an adapter that goes down).
+/// Without it the reconnect to the pinned server address would be routed into
+/// our own adapter, i.e. through tun2socks back into the session that is
+/// waiting for that very reconnect.
+bool bypassNeedsRepair(DefaultRoute current, DefaultRoute latest, String routePrint, String bypassIp) =>
+    bypassNeedsRefresh(current, latest) || !hostRouteExists(routePrint, bypassIp);
+
 final _interfaceLine = RegExp(r'^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(.+?)\s*$', multiLine: true);
 
 /// Parses `netsh interface ipv4 show interfaces` into name -> interface index.
@@ -172,8 +200,20 @@ int? findInterface(Map<String, int> interfaces, String name) {
 /// `whoami /groups` lists S-1-16-12288 (High mandatory level) only when elevated.
 bool isElevated(String whoamiGroups) => whoamiGroups.contains('S-1-16-12288');
 
-Cmd addBypassRouteCmd(String ip, String gateway) =>
-    Cmd('route', ['add', ip, 'mask', '255.255.255.255', gateway, 'metric', '1']);
+/// With [interfaceIndex] the route is pinned to the real adapter that has the
+/// default route. Without it `route` picks the interface from the gateway, which
+/// is ambiguous when two adapters (Wi-Fi and Ethernet on the same LAN) both
+/// reach that gateway: the server's route could end up on the other one.
+Cmd addBypassRouteCmd(String ip, String gateway, {int? interfaceIndex}) => Cmd('route', [
+  'add',
+  ip,
+  'mask',
+  '255.255.255.255',
+  gateway,
+  'metric',
+  '1',
+  if (interfaceIndex != null) ...['if', '$interfaceIndex'],
+]);
 
 /// For "On-link" default routes there is no gateway: route straight out of the interface.
 Cmd addBypassRouteOnLinkCmd(String ip, int interfaceIndex) => Cmd('netsh', [
@@ -805,6 +845,15 @@ List<Cmd> tunSetupCmdsV6() => [
   Cmd('netsh', [
     'interface',
     'ipv6',
+    'set',
+    'subinterface',
+    'interface=$tunName',
+    'mtu=$tunMtu',
+    'store=active',
+  ]),
+  Cmd('netsh', [
+    'interface',
+    'ipv6',
     'add',
     'address',
     'interface=$tunName',
@@ -822,6 +871,36 @@ List<Cmd> tunSetupCmdsV6() => [
       'metric=1',
       'store=active',
     ]),
+];
+
+/// Best-effort IPv4 settings once the adapter exists (the VPN works without
+/// them, so a refusal is only logged):
+///  * the MTU ([tunMtu]), so Windows never hands tun2socks a packet larger
+///    than tun2socks reads;
+///  * forwarding, so traffic of WSL 2, Docker and Hyper-V VMs that the host
+///    NATs out of the adapter (vEthernet (WSL), the Default Switch) can also
+///    come back in through it and be forwarded to the VM. Only tun2socks
+///    sends packets into the adapter, and it only ever answers connections
+///    it was given, so this opens nothing to the outside.
+List<Cmd> tunTuningCmds() => [
+  Cmd('netsh', [
+    'interface',
+    'ipv4',
+    'set',
+    'subinterface',
+    'interface=$tunName',
+    'mtu=$tunMtu',
+    'store=active',
+  ]),
+  Cmd('netsh', [
+    'interface',
+    'ipv4',
+    'set',
+    'interface',
+    'interface=$tunName',
+    'forwarding=enabled',
+    'store=active',
+  ]),
 ];
 
 List<Cmd> tunTeardownCmds() => [
@@ -927,6 +1006,8 @@ String tun2socksFailureSummary(List<String> output) => output.isEmpty ? '' : out
 List<String> tun2socksArgs(int socksPort) => [
   '--device',
   'tun://$tunName',
+  '--mtu',
+  '$tunMtu',
   '--proxy',
   'socks5://127.0.0.1:$socksPort',
   '--loglevel',
@@ -1187,13 +1268,14 @@ Future<bool> _lockInstallRecordDir(Directory dir, void Function(String)? log) as
 /// whether the Wintun driver was already installed. Every start, the folder is
 /// locked to administrators again and an existing record is trusted only if
 /// SYSTEM or Administrators own it ([checkInstallRecord]); anything else is
-/// deleted and recorded afresh. A trusted record is left alone.
-Future<void> recordWintunDriverState({void Function(String)? log}) async {
+/// deleted and recorded afresh. A trusted record is left alone. True when a
+/// trusted record is in place afterwards.
+Future<bool> recordWintunDriverState({void Function(String)? log}) async {
   try {
     final file = installRecordFile;
     final locked = await _lockInstallRecordDir(file.parent, log);
     final trust = checkInstallRecord(file);
-    if (trust == InstallRecordTrust.trusted) return;
+    if (trust == InstallRecordTrust.trusted) return true;
     if (trust == InstallRecordTrust.untrusted) {
       log?.call('${file.path} is not owned by SYSTEM or Administrators (or is unreadable); discarding it');
       try {
@@ -1205,11 +1287,11 @@ Future<void> recordWintunDriverState({void Function(String)? log}) async {
       } catch (e) {
         log?.call('Could not delete it: $e');
       }
-      if (FileSystemEntity.typeSync(file.path, followLinks: false) != FileSystemEntityType.notFound) return;
+      if (FileSystemEntity.typeSync(file.path, followLinks: false) != FileSystemEntityType.notFound) return false;
     }
     if (!locked) {
       log?.call('Not recording the driver state');
-      return;
+      return false;
     }
     final present = await wintunDriverInstalled();
     final value = wintunPreexistingToRecord(
@@ -1218,7 +1300,7 @@ Future<void> recordWintunDriverState({void Function(String)? log}) async {
     );
     if (value == null) {
       log?.call('Could not check whether the Wintun driver is installed');
-      return;
+      return false;
     }
     await file.writeAsString(installRecordJson(wintunPreexisting: value), flush: true);
     // Administrators own what an elevated process creates, unless a policy says otherwise.
@@ -1228,8 +1310,10 @@ Future<void> recordWintunDriverState({void Function(String)? log}) async {
           ? 'Could not tell if the Wintun driver is installed; FoxyVPN will never remove it'
           : 'Wintun driver ${present ? 'was already installed' : 'is not installed yet (FoxyVPN will add it)'}',
     );
+    return true;
   } catch (e) {
     log?.call('Could not record the Wintun driver state: $e');
+    return false;
   }
 }
 
@@ -1294,6 +1378,41 @@ int _removeAdapterSync(String dllPath, String name) {
 int _deleteDriverSync(String dllPath) {
   final lib = DynamicLibrary.open(dllPath);
   return lib.lookupFunction<_DeleteDriverNative, _DeleteDriverDart>('WintunDeleteDriver')();
+}
+
+// iphlpapi: interface alias ("FoxyVPN") -> LUID -> index, without a process.
+typedef _AliasToLuidNative = Uint32 Function(Pointer<Utf16>, Pointer<Uint64>);
+typedef _AliasToLuidDart = int Function(Pointer<Utf16>, Pointer<Uint64>);
+typedef _LuidToIndexNative = Uint32 Function(Pointer<Uint64>, Pointer<Uint32>);
+typedef _LuidToIndexDart = int Function(Pointer<Uint64>, Pointer<Uint32>);
+
+/// The interface index of the adapter called [alias], 0 if there is none.
+/// Runs in a separate isolate (see [_tunInterfaceIndex]): while Windows installs
+/// the Wintun driver or binds a new adapter, calls into the network stack can
+/// wait, and that must never stall the UI.
+int _interfaceIndexByAliasSync(String alias) {
+  final lib = DynamicLibrary.open('iphlpapi.dll');
+  final toLuid = lib.lookupFunction<_AliasToLuidNative, _AliasToLuidDart>('ConvertInterfaceAliasToLuid');
+  final toIndex = lib.lookupFunction<_LuidToIndexNative, _LuidToIndexDart>('ConvertInterfaceLuidToIndex');
+  final aliasC = alias.toNativeUtf16();
+  final luid = calloc<Uint64>();
+  final index = calloc<Uint32>();
+  try {
+    if (toLuid(aliasC, luid) != 0) return 0;
+    if (toIndex(luid, index) != 0) return 0;
+    return index.value;
+  } finally {
+    calloc.free(aliasC);
+    calloc.free(luid);
+    calloc.free(index);
+  }
+}
+
+/// [_interfaceIndexByAliasSync] for our adapter: the index, null if it does
+/// not exist yet; throws if the lookup itself does not work.
+Future<int?> _tunInterfaceIndex() async {
+  final index = await Isolate.run(() => _interfaceIndexByAliasSync(tunName)).timeout(const Duration(seconds: 5));
+  return index > 0 ? index : null;
 }
 
 /// Fallback when closing the handle did not delete the adapter: remove the
@@ -1487,7 +1606,12 @@ Future<DefaultRoute?> _currentDefaultRoute() async =>
 /// Looks up the adapter once, so many routes cost one lookup.
 Future<Cmd Function(String)> _bypassCmdFor(DefaultRoute route) async {
   final gateway = route.gateway;
-  if (gateway != null) return (ip) => addBypassRouteCmd(ip, gateway);
+  if (gateway != null) {
+    // In-process lookup only (no PowerShell): without the index, route.exe
+    // still finds the interface from the gateway.
+    final index = await _interfaceIndexInProcess(route.interfaceIp);
+    return (ip) => addBypassRouteCmd(ip, gateway, interfaceIndex: index);
+  }
   // "On-link" default route: no gateway, so route out of the interface itself.
   final index = await _interfaceIndexOf(route.interfaceIp);
   return (ip) => addBypassRouteOnLinkCmd(ip, index);
@@ -1496,17 +1620,24 @@ Future<Cmd Function(String)> _bypassCmdFor(DefaultRoute route) async {
 /// The interface index that has [interfaceIp]. Asks Windows directly (a few
 /// ms); PowerShell is only the fallback (it takes about a second to start).
 Future<int> _interfaceIndexOf(String interfaceIp) async {
+  final index = await _interfaceIndexInProcess(interfaceIp);
+  if (index != null) return index;
+  final result = await _run(interfaceIndexCmd(interfaceIp));
+  final fallback = parseInterfaceIndex('${result.stdout}');
+  if (fallback == null) throw TunError('Could not find the network adapter that has $interfaceIp.');
+  return fallback;
+}
+
+/// The interface index that has [interfaceIp], from dart:io; null if unknown.
+Future<int?> _interfaceIndexInProcess(String interfaceIp) async {
   try {
     final interfaces = await NetworkInterface.list(includeLoopback: true, includeLinkLocal: true);
-    final index = interfaceIndexForAddress({
+    return interfaceIndexForAddress({
       for (final n in interfaces) n.index: [for (final a in n.addresses) a.address],
     }, interfaceIp);
-    if (index != null) return index;
-  } catch (_) {}
-  final result = await _run(interfaceIndexCmd(interfaceIp));
-  final index = parseInterfaceIndex('${result.stdout}');
-  if (index == null) throw TunError('Could not find the network adapter that has $interfaceIp.');
-  return index;
+  } catch (_) {
+    return null;
+  }
 }
 
 /// Is the tunnel adapter still listed? (Unknown counts as yes.)
@@ -1672,6 +1803,9 @@ class WindowsTun {
 
   static Directory get _appDir => appDirectory;
 
+  /// [recordWintunDriverState] has left a trusted record in this app run.
+  static bool _driverStateRecorded = false;
+
   static Future<WindowsTun> start({
     required int socksPort,
     required InternetAddress bypass,
@@ -1696,8 +1830,11 @@ class WindowsTun {
       throw TunError('The VPN server has an IPv6 address, which is not supported yet.');
     }
 
-    // Before the first adapter exists: remember whether the Wintun driver was already here.
-    await recordWintunDriverState(log: log);
+    // Before the first adapter exists: remember whether the Wintun driver was
+    // already here. Once per app run is enough (4-5 processes each time): after
+    // our first adapter the driver is installed either way, and install.json
+    // is judged again on uninstall.
+    if (!_driverStateRecorded) _driverStateRecorded = await recordWintunDriverState(log: log);
     await cleanupStale(log: log);
 
     final timer = Stopwatch()..start();
@@ -1745,6 +1882,8 @@ class WindowsTun {
       tun._tunIndex = await tun._waitForAdapter();
       final v4 = await _runNetsh(tunSetupCmds());
       if (!v4.ok) throw TunError('Windows refused a network setting: ${v4.output}');
+      final tuning = await _runNetsh(tunTuningCmds());
+      if (!tuning.ok) log?.call('Skipped the adapter MTU/forwarding settings: ${tuning.output}');
       final v6 = await tun._setupIpv6();
       tun._v6 = v6;
       if (!v6) log?.call('IPv6 is not available through the tunnel on this PC');
@@ -2017,16 +2156,19 @@ class WindowsTun {
   Future<void> _refreshBypass() async {
     if (_stopRequested) return;
     try {
-      final latest = await _currentDefaultRoute();
+      final table = '${(await _run(const Cmd('route', ['print', '-4']))).stdout}';
+      final latest = parseDefaultRoute(table);
       if (_stopRequested) return; // once we touch the routes, _stop waits for us
       if (latest == null) {
         _log?.call('No default route right now; keeping the current bypass route');
         return;
       }
-      if (!bypassNeedsRefresh(_route, latest)) return;
+      if (!bypassNeedsRepair(_route, latest, table, _bypass)) return;
       _log?.call(
-        'Network changed: ${_route.gateway ?? 'on-link'} via ${_route.interfaceIp} -> '
-        '${latest.gateway ?? 'on-link'} via ${latest.interfaceIp}',
+        bypassNeedsRefresh(_route, latest)
+            ? 'Network changed: ${_route.gateway ?? 'on-link'} via ${_route.interfaceIp} -> '
+                  '${latest.gateway ?? 'on-link'} via ${latest.interfaceIp}'
+            : 'The route to the VPN server is gone (the adapter went down?); adding it again',
       );
       final cmdFor = await _bypassCmdFor(latest);
       await _addBypass(_bypass, cmdFor); // deletes the old route first
@@ -2054,19 +2196,38 @@ class WindowsTun {
     listen(_process.stderr);
   }
 
+  /// Waits until Windows lists the adapter for IPv4 (the setup commands need
+  /// that). The first time, Windows installs the Wintun driver meanwhile, which
+  /// can take many seconds. The wait used to start `netsh` every 100 ms, i.e.
+  /// dozens of processes that all query the network stack while it is busy
+  /// binding the new adapter. Now an in-process lookup (in its own isolate) waits
+  /// until the adapter exists, and only then is netsh asked, a few times at most.
   Future<int> _waitForAdapter() async {
     final deadline = DateTime.now().add(const Duration(seconds: 20));
+    var inProcess = true; // false once the in-process lookup has failed
+    var adapterSeen = false;
     while (DateTime.now().isBefore(deadline)) {
       if (_exited.isCompleted) {
         throw TunError(
           'The tunnel program stopped right away. ${tun2socksFailureSummary(_lastOutput)}'.trim(),
         );
       }
-      final out =
-          '${(await _run(const Cmd('netsh', ['interface', 'ipv4', 'show', 'interfaces']))).stdout}';
-      final index = findInterface(parseInterfaces(out), tunName);
-      if (index != null) return index;
-      await Future<void>.delayed(const Duration(milliseconds: 100));
+      if (inProcess && !adapterSeen) {
+        try {
+          adapterSeen = await _tunInterfaceIndex() != null;
+        } catch (e) {
+          _log?.call('Looking up the adapter in-process failed ($e); asking netsh');
+          inProcess = false;
+        }
+      }
+      if (adapterSeen || !inProcess) {
+        final out =
+            '${(await _run(const Cmd('netsh', ['interface', 'ipv4', 'show', 'interfaces']))).stdout}';
+        final index = findInterface(parseInterfaces(out), tunName);
+        if (index != null) return index;
+      }
+      // netsh polls are slower: each is a process (60-100 ms of CPU).
+      await Future<void>.delayed(Duration(milliseconds: adapterSeen || !inProcess ? 250 : 100));
     }
     throw TunError(
       'Windows did not create the "$tunName" network adapter. '

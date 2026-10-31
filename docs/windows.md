@@ -99,6 +99,53 @@ the driver is already there. Many VPNs and WireGuard use the same driver. So:
 - Antivirus programs sometimes complain about `wintun.dll` or `tun2socks.exe`. Both are the
   official, unmodified downloads (checked by SHA-256 in the build).
 
+## WSL, Docker and the terminal
+
+FoxyVPN works at the level of Windows' routing table, not per app, so most things on the PC use it
+without any setup:
+
+- **Terminal tools** (`curl`, `git`, `ssh`, `winget`, PowerShell, cmd) go through the VPN like every
+  other program, as long as they are not told to use a proxy. A proxy setting sends their traffic to
+  that proxy instead: `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` variables (curl, git, pip, npm...),
+  `git config http.proxy`, the Windows system proxy (PowerShell 5.1, .NET tools) or the WinHTTP proxy
+  (`netsh winhttp show proxy`; winget, Windows Update). FoxyVPN warns about the variables and both
+  Windows proxies. A proxy on your local network (10.x, 172.16-31.x, 192.168.x) is reached
+  *outside* the VPN, like printers. Ports Mozilla's server does not carry (for example SSH or mail)
+  fail unless **Allow apps the VPN can't carry** is on, and then they are not hidden.
+- **WSL 2, default (NAT) networking.** Windows forwards WSL's traffic out of the host's own routes, so
+  it goes through the VPN. Programs inside WSL do not need any proxy settings. Name lookups:
+  - with DNS tunneling (`dnsTunneling=true` in `.wslconfig`, the default in current WSL on
+    Windows 11), WSL asks Windows, which sends every lookup through the VPN;
+  - without it, `/etc/resolv.conf` points at the WSL gateway (`172.x.x.1`) and Windows' DNS proxy
+    answers there. That proxy is expected to go through Windows' resolver (and so FoxyVPN's DNS
+    rule) too; to be sure no lookup leaves outside the VPN, turn DNS tunneling on (`[wsl2]`
+    section, `dnsTunneling=true`, then `wsl --shutdown`).
+
+  If you set a fixed `nameserver` in `/etc/resolv.conf` yourself (`generateResolvConf = false`), that
+  server is used; a server on your local network is then asked outside the VPN.
+- **WSL 2, mirrored networking** (`networkingMode=mirrored`). WSL sees the Windows adapters, including
+  "FoxyVPN", and its routes, and uses the VPN like any Windows program. DNS tunneling is on by default in
+  this mode.
+- **Docker Desktop** (WSL 2 backend) and VMs on Hyper-V's **Default Switch** are NATed by Windows like
+  WSL, so they use the VPN too. A Hyper-V VM on an **External** virtual switch is bridged straight onto
+  your network card and does *not* go through the VPN (it is like a separate PC on your LAN).
+- WSL, Docker and VMs keep reaching your local network (printers, file shares, `localhost`
+  forwarding) as before; only internet traffic goes through the VPN.
+
+One-time steps, only if something does not work:
+
+1. **WSL was already running when you connected** and does not get through (mirrored mode in
+   particular): run `wsl --shutdown` in PowerShell or cmd once, then open WSL again. Docker Desktop:
+   restart it. This is not needed after every connect, only when WSL started before the VPN.
+2. Check from inside WSL: `curl https://ifconfig.me` (or any "what is my IP" site) should print the
+   VPN's address, the same one FoxyVPN shows.
+3. Plain UDP (games, some VoIP) has the same limits inside WSL as on Windows; QUIC falls back to
+   HTTPS by itself.
+
+FoxyVPN sets the "FoxyVPN" adapter's MTU to 1500 and turns on IPv4 forwarding for it while connected
+(both are removed with the adapter on disconnect), so full-size packets from WSL and VMs fit and
+their replies are forwarded back to them.
+
 ## Troubleshooting
 
 - **Claude Code / other apps don't work while connected.** Another proxy such as Happ is set as

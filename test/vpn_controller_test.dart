@@ -459,7 +459,7 @@ void main() {
       expect(notified, 1);
     });
 
-    test('are looked at again when connecting starts', () async {
+    test('are looked at again after a connect attempt (not during it)', () async {
       var calls = 0;
       final c = make(conflicts: () async {
         calls++;
