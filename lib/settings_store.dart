@@ -1,7 +1,7 @@
 // Small, non-secret app settings in %APPDATA%\FoxyVPN\settings.json (Android:
 // settings.json in the app's private files directory): the email the user
-// signed in with (shown in the UI), the selected location and the
-// direct-fallback switch.
+// signed in with (shown in the UI), the selected location, the
+// direct-fallback switch and (Windows) the tray settings.
 // Never holds tokens (those are in token_store.dart, encrypted).
 
 import 'dart:convert';
@@ -40,6 +40,29 @@ class SettingsStore {
     } else {
       _values.remove('directFallback');
     }
+    _write();
+  }
+
+  /// Windows: closing the window keeps FoxyVPN running in the notification
+  /// area (the VPN stays up). On unless the user switched it off.
+  bool get keepInTray => _values['keepInTray'] != false;
+
+  void setKeepInTray(bool value) {
+    if (value) {
+      _values.remove('keepInTray');
+    } else {
+      _values['keepInTray'] = false;
+    }
+    _write();
+  }
+
+  /// Windows: the "FoxyVPN is still running in the tray" notice was shown
+  /// (it is shown once, the first time the window is closed to the tray).
+  bool get trayHintShown => _values['trayHintShown'] == true;
+
+  void setTrayHintShown() {
+    if (trayHintShown) return;
+    _values['trayHintShown'] = true;
     _write();
   }
 

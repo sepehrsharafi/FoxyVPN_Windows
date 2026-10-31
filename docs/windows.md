@@ -10,24 +10,40 @@ Windows 10 or 11, 64-bit. [Back to the README](../README.md)
    code-signed, Windows SmartScreen may say "Windows protected your PC": click **More info**, then
    **Run anyway**.
 3. Follow the wizard. It can add a desktop shortcut (off by default) and start FoxyVPN at the end.
-4. In FoxyVPN, sign in, pick a location, press **Connect**. Press **Disconnect** (or just close the
-   window) to go back to your normal connection.
+4. In FoxyVPN, sign in, pick a location, press **Connect**. Press **Disconnect** (or **Quit** in the
+   tray icon's menu) to go back to your normal connection.
 
 FoxyVPN always asks for administrator rights when it starts: it needs them to create the virtual
 network adapter and to change network routes. Only one FoxyVPN runs at a time; starting it again
-brings the open window to the front.
+brings its window back to the front, also when it is hidden in the tray.
+
+## Closing, the tray icon and quitting
+
+Like most VPN apps, FoxyVPN keeps running when you close its window:
+
+- **Close (X)** hides the window to the notification area ("system tray", next to the clock). The VPN
+  stays connected. The first time, a notification tells you FoxyVPN is still running there.
+- **Minimise (–)** works as in any other app: the window goes to the taskbar.
+- **The tray icon** is the fox: mint while connected, grey otherwise. Hover it for the status.
+  Click (or double-click) it to open the window again. Right-click it for a menu: **Open FoxyVPN**,
+  the current status, **Connect** / **Disconnect** (to the location selected in the app), and
+  **Quit FoxyVPN**.
+- **Quit FoxyVPN** disconnects the VPN, restores your normal routes and DNS, and then exits.
+
+Prefer the old behaviour, where closing the window disconnects and exits? Turn off **Run in the tray
+when closed** under **Account**. Signing out of Windows or shutting down works as before.
 
 ## Update
 
 Download the newer **FoxyVPN-Setup.exe** the same way and run it. It installs over the old version, in the
-same folder, and keeps your sign-in and settings. If FoxyVPN is running, Setup asks first, then
-disconnects the VPN, closes the app and carries on.
+same folder, and keeps your sign-in and settings. If FoxyVPN is running (also when only in the tray),
+Setup asks first, then disconnects the VPN, quits the app and carries on.
 
 ## Uninstall
 
 Windows **Settings > Apps > Installed apps > FoxyVPN > Uninstall**.
 
-1. If FoxyVPN is running, it is disconnected and closed first.
+1. If FoxyVPN is running (also when only in the tray), it is disconnected and quit first.
 2. You are asked **"Also delete your saved sign-in and settings?"**. The default is **No**, which
    keeps them in case you install FoxyVPN again. A silent uninstall (`/VERYSILENT`) never deletes them.
 3. Before any file is deleted, FoxyVPN's cleanup (`foxyvpn.exe --cleanup`) gives everything back
@@ -104,8 +120,11 @@ the driver is already there. Many VPNs and WireGuard use the same driver. So:
 - **Claude Code / other apps don't work while connected.** Another proxy such as Happ is set as
   the Windows system proxy, so those apps send their traffic to it instead of the VPN. Quit that proxy
   program, or turn on **Allow apps the VPN can't carry** in FoxyVPN.
-- **Setup or Uninstall says FoxyVPN did not close.** Close FoxyVPN with the close button of its
-  window (that disconnects the VPN first), then run Setup or Uninstall again.
+- **Setup or Uninstall says FoxyVPN did not close.** Right-click the FoxyVPN icon in the notification
+  area and choose **Quit FoxyVPN** (that disconnects the VPN first), then run Setup or Uninstall again.
+- **I closed FoxyVPN but the VPN is still on.** Closing the window only hides FoxyVPN to the tray.
+  Use **Disconnect** or **Quit FoxyVPN** in the tray icon's menu (or turn off **Run in the tray when
+  closed** under **Account**).
 - **The internet is gone after FoxyVPN crashed.** Start FoxyVPN again: it removes what the crash
   left behind. Or reboot: the DNS rule is removed at startup.
 - **"Windows protected your PC" when starting Setup.** The installer is not code-signed. **More

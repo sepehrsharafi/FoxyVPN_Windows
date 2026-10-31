@@ -101,6 +101,17 @@ class _AccountScreenState extends State<AccountScreen> {
                                 padding: EdgeInsets.zero,
                                 child: Column(
                                   children: [
+                                    // Windows: closing the window hides FoxyVPN to the
+                                    // notification area (lib/platform/windows_tray.dart).
+                                    if (Host.isWindows) ...[
+                                      _SwitchRow(
+                                        icon: FoxyIcons.minimize,
+                                        label: 'Run in the tray when closed',
+                                        value: controller.keepInTray,
+                                        onChanged: (v) => unawaited(controller.setKeepInTray(v)),
+                                      ),
+                                      const Divider(height: 1, indent: 52),
+                                    ],
                                     _ActionRow(
                                       icon: FoxyIcons.doc,
                                       label: 'Open log',
@@ -382,6 +393,49 @@ class _ActionRow extends StatelessWidget {
             ),
             if (chevron) const FoxyIcon(FoxyIcons.chevronRight, size: 18, color: FoxyColors.textFaint),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// An on/off row in the same style as [_ActionRow], announced as one switch.
+class _SwitchRow extends StatelessWidget {
+  const _SwitchRow({required this.icon, required this.label, required this.value, required this.onChanged});
+
+  final FoxyIcons icon;
+  final String label;
+  final bool value;
+  final ValueChanged<bool> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      toggled: value,
+      label: label,
+      onTap: () => onChanged(!value),
+      excludeSemantics: true,
+      child: Pressable(
+        onTap: () => onChanged(!value),
+        isButton: false,
+        builder: (context, s) => PressableBox(
+          state: s,
+          radius: FoxySpace.cardRadius,
+          hover: FoxyColors.surfaceHi,
+          pressed: FoxyColors.pressed,
+          height: 52,
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: Row(
+            children: [
+              FoxyIcon(icon, size: 20, color: s.hovered ? FoxyColors.text : FoxyColors.textDim),
+              const SizedBox(width: 16),
+              Expanded(
+                child: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis, style: FoxyText.body),
+              ),
+              const SizedBox(width: 12),
+              FoxySwitch(value: value, hovered: s.hovered),
+            ],
+          ),
         ),
       ),
     );

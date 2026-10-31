@@ -502,6 +502,24 @@ class VpnController extends ChangeNotifier {
   }
 
   // ---------------------------------------------------------------------------
+  // Windows tray (the window side is lib/platform/windows_tray.dart)
+  // ---------------------------------------------------------------------------
+
+  /// Closing the window hides FoxyVPN to the notification area (the VPN stays
+  /// up) instead of quitting. On by default.
+  bool get keepInTray => _settings.keepInTray;
+
+  Future<void> setKeepInTray(bool value) async {
+    _settings.setKeepInTray(value);
+    _notify();
+  }
+
+  /// Whether the one-time "still running in the tray" notice was shown.
+  bool get trayHintShown => _settings.trayHintShown;
+
+  void markTrayHintShown() => _settings.setTrayHintShown();
+
+  // ---------------------------------------------------------------------------
   // Locations
   // ---------------------------------------------------------------------------
 

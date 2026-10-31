@@ -86,6 +86,23 @@ void main() {
     expect(SettingsStore(file).directFallback, isTrue);
   });
 
+  test('keep in tray is on unless switched off; the tray notice is remembered', () {
+    final store = SettingsStore(file);
+    expect(store.keepInTray, isTrue);
+    expect(store.trayHintShown, isFalse);
+    store
+      ..setKeepInTray(false)
+      ..setTrayHintShown();
+    var again = SettingsStore(file);
+    expect(again.keepInTray, isFalse);
+    expect(again.trayHintShown, isTrue);
+    expect(jsonDecode(file.readAsStringSync()), {'keepInTray': false, 'trayHintShown': true});
+    store.setKeepInTray(true);
+    again = SettingsStore(file);
+    expect(again.keepInTray, isTrue);
+    expect(jsonDecode(file.readAsStringSync()), {'trayHintShown': true}, reason: 'the default is not stored');
+  });
+
   test('a write that cannot happen does not throw', () {
     // The "folder" is a file, so nothing can be created below it.
     final blocker = File('${dir.path}\\blocker')..writeAsStringSync('x');
