@@ -15,6 +15,7 @@ import '../widgets/foxy_route.dart';
 import '../widgets/foxy_text_field.dart';
 import '../widgets/pressable.dart';
 import 'log_screen.dart';
+import 'page_sign_in_test_screen.dart';
 
 /// Sign in with a Firefox account; a second step takes the emailed code.
 class SignInScreen extends StatefulWidget {
@@ -184,6 +185,16 @@ class _SignInScreenState extends State<SignInScreen> {
                       const SizedBox(height: 16),
                       // Sign-in problems (a 406 from Mozilla) are explained in the log,
                       // so it must be reachable before there is an Account screen.
+                      // Test build: checks whether signing in through Mozilla's page
+                      // gets past the 406 on this network.
+                      if (Host.isAndroid)
+                        Center(
+                          child: AppButton(
+                            label: 'Test Mozilla page sign-in',
+                            kind: AppButtonKind.text,
+                            onPressed: () => unawaited(_push.push(context, (_) => const PageSignInTestScreen())),
+                          ),
+                        ),
                       Center(
                         child: AppButton(label: 'Open log', kind: AppButtonKind.text, onPressed: _openLog),
                       ),

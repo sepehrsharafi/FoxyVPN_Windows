@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:foxyvpn/fxa.dart';
 import 'package:foxyvpn/token_store.dart';
@@ -30,6 +31,33 @@ void main() {
     expect(header, startsWith('Hawk id="c0a29dcf'));
     expect(header, contains('ts="0", nonce="abc", mac="'));
     expect(header, contains('hash="'));
+  });
+
+  test('token requests built for Mozilla\'s page sign exactly the body they carry', () {
+    const session = 'a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf';
+    final request = credentialsTokenRequest(session);
+    expect(request.uri.toString(), 'https://api.accounts.firefox.com/v1/oauth/token');
+    expect(jsonDecode(request.body), {
+      'client_id': '5882386c6d801776',
+      'grant_type': 'fxa-credentials',
+      'scope': 'profile https://identity.mozilla.com/apps/vpn',
+      'access_type': 'offline',
+    });
+    final hash = base64.encode(sha256
+        .convert([...utf8.encode('hawk.1.payload\napplication/json\n'), ...utf8.encode(request.body), 10]).bytes);
+    expect(request.headers['authorization'], contains('hash="$hash"'));
+    expect(request.headers['content-type'], 'application/json');
+
+    final refresh = refreshTokenRequest('r1');
+    expect(jsonDecode(refresh.body), containsPair('refresh_token', 'r1'));
+    expect(refresh.headers.containsKey('authorization'), isFalse);
+  });
+
+  test('token response parsing keeps the old refresh token when none is sent', () {
+    final tokens = tokensFromResponse({'access_token': 'a', 'expires_in': 60}, fallbackRefreshToken: 'old');
+    expect(tokens.accessToken, 'a');
+    expect(tokens.refreshToken, 'old');
+    expect(() => tokensFromResponse({}), throwsA(isA<FxaError>()));
   });
 
   test('email normalisation strips spaces and lowercases', () {

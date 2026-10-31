@@ -49,6 +49,14 @@ void main() {
     await tester.tap(find.text('Open log'));
     await tester.pump();
     expect(c.calls, ['openLog']);
+    expect(find.text('Test Mozilla page sign-in'), findsNothing, reason: 'Android only');
+  });
+
+  testWidgets('Android offers the Mozilla page sign-in test', (tester) async {
+    final c = FakeVpnController()..signedIn = false;
+    await pumpPhone(tester, c);
+    expect(find.text('Test Mozilla page sign-in'), findsOneWidget);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('password can be shown and hidden', (tester) async {

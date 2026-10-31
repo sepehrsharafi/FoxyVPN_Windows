@@ -126,20 +126,8 @@ class FxaClient {
     return _tokensFrom(data);
   }
 
-  AuthTokens _tokensFrom(Map<String, dynamic> data, {String? fallbackRefreshToken}) {
-    final accessToken = data['access_token'] as String?;
-    if (accessToken == null || accessToken.isEmpty) {
-      throw FxaError('Firefox Accounts returned no access token.');
-    }
-    final expiresIn = (data['expires_in'] as num?)?.toInt();
-    final refresh = data['refresh_token'] as String?;
-    return AuthTokens(
-      accessToken: accessToken,
-      refreshToken: (refresh != null && refresh.isNotEmpty) ? refresh : fallbackRefreshToken,
-      expiresAt: DateTime.now().add(
-          expiresIn != null && expiresIn > 0 ? Duration(seconds: expiresIn) : _defaultAccessTokenTtl),
-    );
-  }
+  AuthTokens _tokensFrom(Map<String, dynamic> data, {String? fallbackRefreshToken}) =>
+      tokensFromResponse(data, fallbackRefreshToken: fallbackRefreshToken);
 
   Future<Map<String, dynamic>> _post(String path, Map<String, dynamic> json,
       {String? sessionToken}) async {
@@ -164,6 +152,58 @@ class FxaClient {
     return jsonDecode(response.body) as Map<String, dynamic>;
   }
 }
+
+AuthTokens tokensFromResponse(Map<String, dynamic> data, {String? fallbackRefreshToken}) {
+  final accessToken = data['access_token'] as String?;
+  if (accessToken == null || accessToken.isEmpty) {
+    throw FxaError('Firefox Accounts returned no access token.');
+  }
+  final expiresIn = (data['expires_in'] as num?)?.toInt();
+  final refresh = data['refresh_token'] as String?;
+  return AuthTokens(
+    accessToken: accessToken,
+    refreshToken: (refresh != null && refresh.isNotEmpty) ? refresh : fallbackRefreshToken,
+    expiresAt: DateTime.now()
+        .add(expiresIn != null && expiresIn > 0 ? Duration(seconds: expiresIn) : _defaultAccessTokenTtl),
+  );
+}
+
+/// A POST to /oauth/token, built here so it can be sent from Mozilla's own web
+/// page (mozilla_page.dart): Mozilla refuses this request from apps on some
+/// networks. [body] is the exact text the Hawk header signs.
+class TokenRequest {
+  TokenRequest(this.uri, this.headers, this.body);
+  final Uri uri;
+  final Map<String, String> headers;
+  final String body;
+}
+
+/// Trades a session (from signing in) for VPN tokens.
+TokenRequest credentialsTokenRequest(String sessionToken) {
+  final uri = Uri.parse('$_authServer/oauth/token');
+  final body = jsonEncode({
+    'client_id': _firefoxClientId,
+    'grant_type': 'fxa-credentials',
+    'scope': _oauthScope,
+    'access_type': 'offline',
+  });
+  return TokenRequest(uri, {
+    'content-type': 'application/json',
+    'authorization': hawkHeader('POST', uri, sessionToken, utf8.encode(body)),
+  }, body);
+}
+
+/// Renews the access token.
+TokenRequest refreshTokenRequest(String refreshToken) => TokenRequest(
+      Uri.parse('$_authServer/oauth/token'),
+      {'content-type': 'application/json'},
+      jsonEncode({
+        'client_id': _firefoxClientId,
+        'grant_type': 'refresh_token',
+        'refresh_token': refreshToken,
+        'scope': _oauthScope,
+      }),
+    );
 
 String? _friendlyMessage(int? errno) => switch (errno) {
       102 => 'No Firefox account exists for that email.',
