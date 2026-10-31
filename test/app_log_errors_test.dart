@@ -18,7 +18,8 @@ void main() {
       expect(friendlyError(QuotaExceeded()), QuotaExceeded().message);
       expect(friendlyError(GuardianError('Nope', statusCode: 500)), 'Nope');
       expect(friendlyError(FxaError('Wrong password', statusCode: 400)), 'Wrong password');
-      expect(friendlyError(BrowserCheckRequired()), contains('browser check'));
+      expect(friendlyError(BrowserCheckRequired('vpn.mozilla.org')), contains('vpn.mozilla.org'));
+      expect(friendlyError(BrowserCheckRequired()), contains('HTTP 406'));
     });
 
     test('network errors become plain sentences without technical details', () {

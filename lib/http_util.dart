@@ -2,15 +2,37 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'app_log.dart';
 import 'servers.dart' show mozillaVpnUserAgent;
 
-/// Mozilla's edge returned its anti-bot check (HTTP 406). The app does not
-/// solve it automatically; the user has to pass it in a real browser.
+/// Mozilla's server refused the request with HTTP 406. Why is not something the
+/// app can tell from the status alone (an anti-bot layer, or the request itself
+/// was refused), and signing in on accounts.firefox.com in a browser does not
+/// change how the app's own requests are judged. So the message only says which
+/// server refused; its full answer goes to the log ([logRefusedResponse]).
 class BrowserCheckRequired implements Exception {
+  BrowserCheckRequired([this.host = '']);
+
+  /// The server that refused, e.g. api.accounts.firefox.com or vpn.mozilla.org.
+  final String host;
+
   @override
   String toString() =>
-      'Mozilla asked for a browser check. Open accounts.firefox.com in your browser, '
-      'sign in there once, then try again here in a few minutes.';
+      'Mozilla\'s server${host.isEmpty ? '' : ' ($host)'} refused the request (HTTP 406). '
+      'Open the log for the details of its answer.';
+}
+
+/// Logs what a refusing server answered: endpoint, status, the headers that
+/// show which layer answered (Mozilla's app or the edge in front of it) and the
+/// start of the body. Nothing of the request is logged, so no token or password.
+void logRefusedResponse(String method, Uri uri, int status, HttpHeaders headers, String body) {
+  final picked = <String>[
+    for (final name in const ['server', 'content-type', 'via', 'x-cache', 'cf-ray', 'retry-after'])
+      if (headers.value(name) case final value?) '$name: $value',
+  ];
+  final excerpt = body.replaceAll(RegExp(r'\s+'), ' ').trim();
+  AppLog.write('HTTP $status from $method ${uri.host}${uri.path} [${picked.join('; ')}] body: '
+      '${excerpt.length > 600 ? '${excerpt.substring(0, 600)}...' : excerpt}');
 }
 
 class JsonResponse {
@@ -106,7 +128,10 @@ Future<JsonResponse> sendJson(String method, Uri uri,
     }
     final response = await request.close().timeout(const Duration(seconds: 30));
     final text = await response.transform(utf8.decoder).join();
-    if (response.statusCode == 406) throw BrowserCheckRequired();
+    if (response.statusCode == 406) {
+      logRefusedResponse(method, uri, response.statusCode, response.headers, text);
+      throw BrowserCheckRequired(uri.host);
+    }
     return JsonResponse(response.statusCode, text, response.headers);
   } finally {
     client.close(force: true);
