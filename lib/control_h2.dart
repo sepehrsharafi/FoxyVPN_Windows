@@ -99,13 +99,17 @@ class _Connection {
 
   Future<JsonResponse> request(String method, Uri uri, Map<String, String> headers, List<int>? body) async {
     final hasBody = body != null && body.isNotEmpty;
+    final fields = {for (final e in headers.entries) e.key.toLowerCase(): e.value};
+    // Laid out as Go's HTTP/2 client (NAT-on-steroids) sends them: pseudo-headers
+    // in Go's order, content-length on every POST, and gzip accepted.
     final stream = _transport.makeRequest([
-      _header(':method', method),
-      _header(':scheme', uri.scheme),
-      _header(':path', uri.hasQuery ? '${uri.path}?${uri.query}' : (uri.path.isEmpty ? '/' : uri.path)),
       _header(':authority', uri.hasPort && uri.port != 443 ? '${uri.host}:${uri.port}' : uri.host),
-      for (final e in headers.entries) _header(e.key.toLowerCase(), e.value),
-      if (body != null) _header('content-length', '${body.length}'),
+      _header(':method', method),
+      _header(':path', uri.hasQuery ? '${uri.path}?${uri.query}' : (uri.path.isEmpty ? '/' : uri.path)),
+      _header(':scheme', uri.scheme),
+      for (final e in fields.entries) _header(e.key, e.value),
+      if (!fields.containsKey('accept-encoding')) _header('accept-encoding', 'gzip'),
+      if (body != null || method == 'POST') _header('content-length', '${body?.length ?? 0}'),
     ], endStream: !hasBody);
     if (hasBody) stream.sendData(body, endStream: true);
 
@@ -129,7 +133,15 @@ class _Connection {
       }
     }
     if (status == null) throw const HttpException('HTTP/2 response without a status');
-    return JsonResponse(status, utf8.decode(bytes.takeBytes()), ResponseHeaders(values));
+    var raw = bytes.takeBytes();
+    // Asked for with accept-encoding above; unpacked as Go does.
+    if (values['content-encoding']?.first.toLowerCase() == 'gzip' && raw.isNotEmpty) {
+      raw = Uint8List.fromList(gzip.decode(raw));
+      values
+        ..remove('content-encoding')
+        ..remove('content-length');
+    }
+    return JsonResponse(status, utf8.decode(raw, allowMalformed: true), ResponseHeaders(values));
   }
 
   void close() {

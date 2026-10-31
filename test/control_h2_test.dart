@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:foxyvpn/control_h2.dart';
 import 'package:foxyvpn/http_util.dart';
 import 'package:http2/http2.dart';
 
@@ -73,13 +74,16 @@ void main() {
             }
           }
           seen.add(headers);
+          final zipped = headers[':path'] == '/gzip';
           stream.sendHeaders([
             Header.ascii(':status', headers[':path'] == '/missing' ? '404' : '200'),
             Header.ascii('content-type', 'application/json'),
             Header.ascii('set-cookie', 'edge=ok; Path=/'),
             Header.ascii('x-quota-remaining', '7'),
+            if (zipped) Header.ascii('content-encoding', 'gzip'),
           ]);
-          stream.sendData(utf8.encode(jsonEncode({'echo': utf8.decode(body.takeBytes())})), endStream: true);
+          final reply = utf8.encode(jsonEncode({'echo': utf8.decode(body.takeBytes())}));
+          stream.sendData(zipped ? gzip.encode(reply) : reply, endStream: true);
         });
       });
     });
@@ -99,6 +103,8 @@ void main() {
       expect(second.statusCode, 404);
       expect(connections, hasLength(1), reason: 'the second request reuses the first connection');
 
+      expect(seen[0].keys.take(4), [':authority', ':method', ':path', ':scheme'], reason: 'Go\'s order');
+      expect(seen[0], containsPair('accept-encoding', 'gzip'));
       expect(seen[0], containsPair(':method', 'POST'));
       expect(seen[0], containsPair(':path', '/v1/account/login?x=1'));
       expect(seen[0], containsPair(':authority', 'localhost:${server.port}'));
@@ -108,6 +114,14 @@ void main() {
       expect(seen[0]['user-agent'], startsWith('MozillaVPN/'));
       expect(seen[0].containsKey('cookie'), isFalse);
       expect(seen[1], containsPair('cookie', 'edge=ok'), reason: 'the cookie from the first answer comes back');
+    });
+
+    test('a gzip answer is unpacked; a POST without a body still says content-length 0', () async {
+      final zipped = await sendJson('POST', at('/gzip'), body: utf8.encode('{"z":1}'));
+      expect(jsonDecode(zipped.body), {'echo': '{"z":1}'});
+      expect(zipped.headers.value('content-encoding'), isNull);
+      await sendH2('POST', at('/empty'), {'user-agent': 'x'}, null);
+      expect(seen.last, containsPair('content-length', '0'));
     });
 
     test('a kept connection the server closed is replaced', () async {
