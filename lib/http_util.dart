@@ -103,8 +103,10 @@ class ControlPlane {
   }
 }
 
+/// Sends with the MozillaVPN user agent unless [userAgent] is given (FxA passes
+/// its Firefox identity).
 Future<JsonResponse> sendJson(String method, Uri uri,
-    {List<int>? body, Map<String, String> headers = const {}}) async {
+    {List<int>? body, Map<String, String> headers = const {}, String? userAgent}) async {
   const connectTimeout = Duration(seconds: 20);
   final client = HttpClient()..connectionTimeout = connectTimeout;
   final source = ControlPlane.sourceAddress;
@@ -117,7 +119,7 @@ Future<JsonResponse> sendJson(String method, Uri uri,
   try {
     final request = await client.openUrl(method, uri);
     request.headers
-      ..set(HttpHeaders.userAgentHeader, mozillaVpnUserAgent)
+      ..set(HttpHeaders.userAgentHeader, userAgent ?? mozillaVpnUserAgent)
       ..set(HttpHeaders.acceptHeader, 'application/json');
     headers.forEach(request.headers.set);
     if (body != null) {

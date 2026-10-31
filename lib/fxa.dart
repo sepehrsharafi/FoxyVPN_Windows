@@ -7,6 +7,7 @@ import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 
+import 'firefox_identity.dart';
 import 'http_util.dart';
 
 const _authServer = 'https://api.accounts.firefox.com/v1';
@@ -145,7 +146,7 @@ class FxaClient {
       {String? sessionToken}) async {
     final uri = Uri.parse('$_authServer$path');
     final body = utf8.encode(jsonEncode(json));
-    final response = await sendJson('POST', uri, body: body, headers: {
+    final response = await sendJson('POST', uri, body: body, userAgent: firefoxUserAgent, headers: {
       if (sessionToken != null) 'authorization': hawkHeader('POST', uri, sessionToken, body),
     });
     if (response.statusCode >= 400) {

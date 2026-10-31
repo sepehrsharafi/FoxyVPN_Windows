@@ -7,11 +7,13 @@ const _serverListUrl =
     'https://firefox.settings.services.mozilla.com/v1/buckets/main/collections/vpn-serverlist/records';
 
 /// The Mozilla VPN client's user agent for the platform we run on (the
-/// official clients send sys:windows / sys:android). Windows is unchanged.
+/// official clients send sys:windows / sys:android), for Guardian and the
+/// server list. Firefox Accounts gets a Firefox identity instead
+/// (firefox_identity.dart).
 final mozillaVpnUserAgent = mozillaVpnUserAgentFor(android: Platform.isAndroid);
 
 String mozillaVpnUserAgentFor({required bool android}) =>
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0';
+    'MozillaVPN/2.35.0 (sys:${android ? 'android' : 'windows'}; iap:true)';
 
 const _excludedCountries = {'catchall anycast'};
 
