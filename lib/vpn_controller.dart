@@ -743,9 +743,22 @@ class VpnController extends ChangeNotifier {
 
   void _onStatsTick() {
     final session = _session;
-    if (session != null) _speed.sample(session.bytesUp, session.bytesDown, _clock());
-    if (!_disposed) _stats.tick();
+    if (session == null || _disposed) return;
+    final up = session.bytesUp;
+    final down = session.bytesDown;
+    final changed = _speed.sample(up, down, _clock());
+    // An idle tunnel (no bytes, speeds already at 0) would otherwise rebuild,
+    // lay out and repaint the speed tiles every second for nothing. (A new
+    // session or state change rebuilds them anyway, with the whole page.)
+    if (!changed && up == _tickedUp && down == _tickedDown) return;
+    _tickedUp = up;
+    _tickedDown = down;
+    _stats.tick();
   }
+
+  // The byte counts the stats last ticked with.
+  int _tickedUp = -1;
+  int _tickedDown = -1;
 
   Timer? _notifySoonTimer;
 

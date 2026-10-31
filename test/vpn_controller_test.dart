@@ -590,6 +590,37 @@ void main() {
       expect(c.downBytesPerSec, 0);
     });
 
+    test('an idle tunnel does not tick the stats; traffic does', () async {
+      final c = build();
+      await c.init();
+      await c.connect();
+      var ticks = 0;
+      c.stats.addListener(() => ticks++);
+      fake.bytesDown = 5000;
+      now = now.add(const Duration(seconds: 1));
+      await pause(40);
+      expect(ticks, greaterThan(0));
+      expect(c.downBytesPerSec, greaterThan(0));
+
+      // No more bytes: the speed decays to 0 (each step a tick) ...
+      for (var i = 0; i < 40 && c.downBytesPerSec > 0; i++) {
+        now = now.add(const Duration(seconds: 1));
+        await pause(15);
+      }
+      expect(c.downBytesPerSec, 0);
+      // ... and then the 10 ms ticks stop notifying.
+      await pause(30);
+      final settled = ticks;
+      await pause(100);
+      expect(ticks, settled);
+
+      fake.bytesUp = 10;
+      now = now.add(const Duration(seconds: 1));
+      await pause(40);
+      expect(ticks, greaterThan(settled));
+      await c.disconnect();
+    });
+
     test('the exit IP and country are fetched once after connecting and cleared on disconnect', () async {
       Duration? usedTimeout;
       String? usedHost;
