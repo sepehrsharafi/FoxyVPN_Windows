@@ -38,3 +38,26 @@ Changes (all marked `PATCH(foxyvpn)`):
    setting), so a stream opened before the ACK could send ~1 MiB more than the
    peer allows (FLOW_CONTROL_ERROR). Now the ACK adjusts those streams'
    receive windows instead; only the peer's own setting changes send windows.
+7. `lib/src/frames/frame_writer.dart`: frames are no longer written to the
+   socket one by one. Everything written in one event-loop turn is queued and
+   goes out as ONE write from a microtask (and `close()` flushes first). A DATA
+   payload is not copied into a frame-sized buffer any more; header and payload
+   are copied once, into that joined buffer. Stock 3.1.0 issued a socket write
+   (a syscall, a TLS record, a pause/resume of the socket's `addStream`) per
+   16 KiB DATA frame and per 13-byte WINDOW_UPDATE.
+8. `lib/src/flowcontrol/connection_queues.dart` (`_trySendMessages`): sends up
+   to 256 KiB of queued messages per turn (the TODO in the stock code) instead
+   of one message per `Timer.run()`, so (7) can join them.
+9. `lib/src/flowcontrol/window_handler.dart` (`dataProcessed`): receive credit
+   is collected and returned in one WINDOW_UPDATE once it reaches a quarter of
+   the window (stream: 256 KiB of 1 MiB; connection: 4 MiB of 16 MiB) instead
+   of one WINDOW_UPDATE per DATA frame on both levels. Cannot stall the peer:
+   of the window it may not use, whatever is not still queued for a paused
+   stream is credit held back here, so once the queue is drained that credit
+   is the whole window and goes out. The peer always has at least 3/4 of the
+   window to send into. Works with (3) and (5): credit is still counted on
+   receipt for the connection, and an increment is never 0.
+
+Measured with a loopback benchmark (SOCKS server + `UpstreamSession` against a
+local HTTP/2 edge, plaintext, AOT, 8 flows x 128 MB; CPU of the app process
+only): download 5.0 -> 2.5 ms CPU per MB, upload 3.6 -> 2.6 ms per MB.

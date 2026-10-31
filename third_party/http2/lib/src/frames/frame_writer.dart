@@ -50,15 +50,13 @@ class FrameWriter {
     var type = FrameType.DATA;
     var flags = endStream ? DataFrame.FLAG_END_STREAM : 0;
 
-    var buffer = Uint8List(FRAME_HEADER_SIZE + data.length);
-    var offset = 0;
-
-    _setFrameHeader(buffer, offset, type, flags, streamId, data.length);
-    offset += FRAME_HEADER_SIZE;
-
-    buffer.setRange(offset, offset + data.length, data);
-
-    _writeData(buffer);
+    // PATCH(foxyvpn): the payload is not copied into a frame-sized buffer
+    // here; header and payload are queued as they are and copied once, into
+    // the single buffer [_flush] writes. See PATCHES.md (7).
+    var header = Uint8List(FRAME_HEADER_SIZE);
+    _setFrameHeader(header, 0, type, flags, streamId, data.length);
+    _writeData(header);
+    if (data.isNotEmpty) _writeData(data);
   }
 
   void writeHeadersFrame(
@@ -305,12 +303,59 @@ class FrameWriter {
     _writeData(buffer);
   }
 
+  // PATCH(foxyvpn): everything written in one event-loop turn (DATA frames of
+  // many streams, the WINDOW_UPDATEs for a burst of received frames, ...) goes
+  // to the socket as ONE write from a microtask, instead of one write (a
+  // syscall, a TLS record, a pause/resume of the socket's addStream) per
+  // frame. See PATCHES.md (7).
+  final List<List<int>> _pending = [];
+  int _pendingBytes = 0;
+  bool _flushScheduled = false;
+  bool _closed = false;
+
   void _writeData(List<int> bytes) {
-    _outWriter.add(bytes);
+    if (_closed) {
+      // As before: writing after close() fails right here, at the caller.
+      _outWriter.add(bytes);
+      return;
+    }
+    _pending.add(bytes);
+    _pendingBytes += bytes.length;
+    if (!_flushScheduled) {
+      _flushScheduled = true;
+      scheduleMicrotask(_flush);
+    }
+  }
+
+  void _flush() {
+    _flushScheduled = false;
+    if (_pending.isEmpty) return;
+    final List<int> out;
+    if (_pending.length == 1) {
+      out = _pending[0];
+    } else {
+      final joined = Uint8List(_pendingBytes);
+      var offset = 0;
+      for (final part in _pending) {
+        joined.setRange(offset, offset + part.length, part);
+        offset += part.length;
+      }
+      out = joined;
+    }
+    _pending.clear();
+    _pendingBytes = 0;
+    try {
+      _outWriter.add(out);
+    } catch (_) {
+      // The sink is already closed (the connection was torn down): the frames
+      // are moot, and the connection learns of the end through [doneFuture].
+    }
   }
 
   /// Closes the underlying sink and returns [doneFuture].
   Future close() {
+    _flush();
+    _closed = true;
     return _outWriter.close().whenComplete(() => doneFuture);
   }
 
