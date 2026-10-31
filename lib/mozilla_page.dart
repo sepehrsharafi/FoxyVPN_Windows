@@ -51,18 +51,20 @@ class MozillaPage {
 
   /// POSTs [body] to [uri] with fetch() from the page. Throws on a network error
   /// or timeout; any HTTP status is returned.
-  Future<PageResponse> post(Uri uri, Map<String, String> headers, String body) async {
+  Future<PageResponse> post(Uri uri, Map<String, String> headers, String body) => send('POST', uri, headers, body);
+
+  /// [body] null sends none (GET).
+  Future<PageResponse> send(String method, Uri uri, Map<String, String> headers, String? body) async {
     await _loaded.future.timeout(_loadTimeout,
         onTimeout: () => throw TimeoutException('Mozilla\'s page did not load'));
     final id = _nextId++;
     final reply = _pending[id] = Completer<PageResponse>();
-    // Default credentials, as the page itself uses for this endpoint.
+    final init = {'method': method, 'headers': headers, 'body': ?body};
+    // Default credentials, as the page itself uses for these endpoints.
     await controller.runJavaScript('''
 (async () => {
   try {
-    const r = await fetch(${jsonEncode(uri.toString())}, {
-      method: 'POST', headers: ${jsonEncode(headers)}, body: ${jsonEncode(body)},
-    });
+    const r = await fetch(${jsonEncode(uri.toString())}, ${jsonEncode(init)});
     FoxyFetch.postMessage(JSON.stringify({id: $id, status: r.status, body: await r.text()}));
   } catch (e) {
     FoxyFetch.postMessage(JSON.stringify({id: $id, error: String(e)}));

@@ -103,6 +103,7 @@ class _PageSignInTestScreenState extends State<PageSignInTestScreen> {
   String? _pendingSession;
   String? _email;
   bool _started = false;
+  bool _waiting = false;
 
   @override
   void initState() {
@@ -178,15 +179,48 @@ class _PageSignInTestScreenState extends State<PageSignInTestScreen> {
     unawaited(_signIn.runJavaScript('window.__foxyReply && window.__foxyReply(${args.join(', ')});').catchError((_) {}));
   }
 
+  /// The page says the sign-in is done, but that can come before Mozilla has
+  /// accepted the emailed code. The checks start once Mozilla confirms the
+  /// session; meanwhile the page stays usable for typing the code.
   void _sessionVerified() {
     final session = _pendingSession;
     if (session == null || _started) return;
     _started = true;
-    unawaited(_runChecks(session));
+    unawaited(_waitForConfirmedSession(session));
+  }
+
+  Future<void> _waitForConfirmedSession(String session) async {
+    if (mounted) setState(() => _waiting = true);
+    final deadline = DateTime.now().add(const Duration(minutes: 10));
+    String? lastSeen;
+    var confirmed = false;
+    while (mounted && DateTime.now().isBefore(deadline)) {
+      String seen;
+      try {
+        final request = sessionStatusRequest(session);
+        final r = await _page.send('GET', request.uri, request.headers, null);
+        final data = r.status == 200 ? jsonDecode(r.body) as Map<String, dynamic> : null;
+        confirmed = data?['sessionVerified'] == true;
+        seen = data == null ? 'HTTP ${r.status} ${_excerpt(r.body)}' : 'sessionVerified=${data['sessionVerified']}';
+      } catch (e) {
+        seen = '$e';
+      }
+      if (seen != lastSeen) AppLog.write('Page sign-in test: session status: $seen');
+      lastSeen = seen;
+      if (confirmed) break;
+      await Future<void>.delayed(const Duration(seconds: 3));
+    }
+    if (!mounted) return;
+    setState(() => _waiting = false);
+    if (confirmed) {
+      unawaited(_runChecks(session));
+    } else {
+      _finish(_add('Mozilla confirmed the sign-in'), _Outcome.failed, 'Not confirmed within 10 minutes: $lastSeen');
+    }
   }
 
   Future<void> _runChecks(String session) async {
-    final signedIn = _add('Signed in on Mozilla\'s page')
+    final signedIn = _add('Signed in on Mozilla\'s page, sign-in confirmed')
       ..outcome = _Outcome.ok
       ..detail = _email ?? '';
     _log(signedIn);
@@ -274,6 +308,15 @@ class _PageSignInTestScreenState extends State<PageSignInTestScreen> {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 const PageHeader(title: 'Test Mozilla sign-in'),
+                if (_waiting)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(FoxySpace.screen, 0, FoxySpace.screen, 12),
+                    child: Text(
+                      'Waiting for Mozilla to confirm the sign-in. If the page asks for the code '
+                      'from your email, enter it there; if the email has a confirm link instead, open it.',
+                      style: FoxyText.caption,
+                    ),
+                  ),
                 if (_steps.isEmpty)
                   Expanded(child: WebViewWidget(controller: _signIn))
                 else

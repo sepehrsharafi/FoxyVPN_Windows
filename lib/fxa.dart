@@ -193,6 +193,13 @@ TokenRequest credentialsTokenRequest(String sessionToken) {
   }, body);
 }
 
+/// GET that tells whether a session is confirmed yet (`sessionVerified`): until
+/// the emailed code is accepted, /oauth/token answers 400 "Unconfirmed session".
+({Uri uri, Map<String, String> headers}) sessionStatusRequest(String sessionToken) {
+  final uri = Uri.parse('$_authServer/recovery_email/status');
+  return (uri: uri, headers: {'authorization': hawkHeader('GET', uri, sessionToken, const [])});
+}
+
 /// Renews the access token.
 TokenRequest refreshTokenRequest(String refreshToken) => TokenRequest(
       Uri.parse('$_authServer/oauth/token'),

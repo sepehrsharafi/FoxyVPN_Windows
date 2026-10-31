@@ -48,6 +48,11 @@ void main() {
     expect(request.headers['authorization'], contains('hash="$hash"'));
     expect(request.headers['content-type'], 'application/json');
 
+    final status = sessionStatusRequest(session);
+    expect(status.uri.toString(), 'https://api.accounts.firefox.com/v1/recovery_email/status');
+    expect(status.headers['authorization'], startsWith('Hawk id="c0a29dcf'));
+    expect(status.headers['authorization'], isNot(contains('hash=')), reason: 'a GET has no body to sign');
+
     final refresh = refreshTokenRequest('r1');
     expect(jsonDecode(refresh.body), containsPair('refresh_token', 'r1'));
     expect(refresh.headers.containsKey('authorization'), isFalse);
