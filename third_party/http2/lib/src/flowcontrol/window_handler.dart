@@ -103,14 +103,19 @@ class IncomingWindowHandler {
   /// The stream id this window handler is for (is `0` for connection level).
   final int _streamId;
 
+  /// PATCH(foxyvpn): the full size of this window (what the peer may have in
+  /// flight when nothing has been received yet), for batching updates.
+  int _windowSize;
+
   IncomingWindowHandler.stream(
     this._frameWriter,
     this._localWindow,
     this._streamId,
-  );
+  ) : _windowSize = _localWindow.size;
 
   IncomingWindowHandler.connection(this._frameWriter, this._localWindow)
-    : _streamId = 0;
+    : _streamId = 0,
+      _windowSize = _localWindow.size;
 
   /// The current size for the incoming data window.
   ///
@@ -155,6 +160,7 @@ class IncomingWindowHandler {
   /// peer, which already applied it to this stream). Nothing is sent.
   void processInitialWindowSizeChange(int difference) {
     _localWindow.modify(difference);
+    _windowSize += difference;
   }
 
   /// Tell the peer we received [numberOfBytes] bytes. It will increase it's
@@ -168,11 +174,23 @@ class IncomingWindowHandler {
     // (RFC 9113 6.9; a connection error on stream 0). Empty DATA frames, e.g.
     // a bare END_STREAM, must not produce one.
     if (numberOfBytes <= 0) return;
-    _localWindow.modify(numberOfBytes);
 
-    // TODO: This can be optimized by delaying the window update to
-    // send one update with a bigger difference than multiple small update
-    // frames.
-    _frameWriter.writeWindowUpdate(numberOfBytes, streamId: _streamId);
+    // PATCH(foxyvpn): credit is collected and returned in one WINDOW_UPDATE
+    // once it reaches a quarter of the window (nghttp2 and browsers wait for
+    // half), instead of one WINDOW_UPDATE per DATA frame. This can never
+    // stall the peer: whatever it may not send is either still queued here
+    // (delivered later, credit follows) or credit held back, and when the
+    // queue is empty the held-back credit is the whole window, far above the
+    // threshold. The peer keeps at least 3/4 of the window to send into.
+    // See PATCHES.md (9).
+    _unsentCredit += numberOfBytes;
+    if (_unsentCredit < _windowSize ~/ 4) return;
+    final increment = _unsentCredit;
+    _unsentCredit = 0;
+    _localWindow.modify(increment);
+    _frameWriter.writeWindowUpdate(increment, streamId: _streamId);
   }
+
+  /// PATCH(foxyvpn): bytes processed but not yet returned to the peer.
+  int _unsentCredit = 0;
 }

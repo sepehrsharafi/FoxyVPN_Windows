@@ -366,8 +366,90 @@ void main() {
       final second = tap.frames[1];
       expect((second.type, second.streamId, second.increment), (8, 0, (16 << 20) - 65535));
       final updates = tap.frames.where((f) => f.type == 8).toList();
-      expect(updates.where((f) => f.streamId == 0 && f.increment == 5), isNotEmpty);
+      // Credit is batched (half-window rule): 5 bytes don't earn an update of
+      // their own, so the big window is the only connection-level one.
+      expect(updates.where((f) => f.streamId == 0), hasLength(1));
       expect(updates.where((f) => f.increment == 0), isEmpty);
+    });
+
+    test('WINDOW_UPDATEs are batched, not one per DATA frame, and the flow never stalls', () async {
+      const total = 6 * 1024 * 1024;
+      final edge = TestEdge(
+        onStream: (stream) {
+          for (var i = 0; i < total; i += 16 * 1024) {
+            stream.sendData(Uint8List(16 * 1024));
+          }
+        },
+      )..echo = false;
+      await edge.start();
+      final tap = WireTap();
+      await tap.start(edge.port);
+      final socket = await Socket.connect(InternetAddress.loopbackIPv4, tap.port);
+      final session = UpstreamSession.withSocket(socket, token: 'tok', address: InternetAddress.loopbackIPv4);
+      addTearDown(() async {
+        await session.close();
+        await tap.close();
+        await edge.close();
+      });
+      await Future<void>.delayed(const Duration(milliseconds: 100)); // SETTINGS both ways
+
+      final flow = await session.open('a.example', 443);
+      // A slow reader: the 1 MiB stream window runs dry again and again, and
+      // must be reopened every time.
+      final flowIn = Collector(flow.incoming.asyncMap((d) async {
+        await Future<void>.delayed(Duration.zero);
+        return d;
+      }));
+      await flowIn.waitFor(total, timeout: const Duration(seconds: 30));
+      flow.abort();
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+
+      final updates = tap.frames.where((f) => f.type == 8).toList();
+      final perStream = updates.where((f) => f.streamId != 0).toList();
+      // One per 16 KiB frame would be 384. A quarter of the 1 MiB window per update: ~24.
+      expect(perStream.length, inInclusiveRange(1, 30));
+      expect(perStream.every((f) => f.increment! >= 256 * 1024), isTrue);
+      // The initial big window, then one batch per 4 MiB (a quarter of 16 MiB).
+      expect(updates.where((f) => f.streamId == 0).length, inInclusiveRange(1, 3));
+    });
+
+    test('frames written in one turn go to the socket as one write', () async {
+      final toClient = StreamController<List<int>>();
+      final fromClient = StreamController<List<int>>();
+      final writes = <int>[];
+      final sent = FrameLog();
+      fromClient.stream.listen((chunk) {
+        writes.add(chunk.length);
+        sent.add(chunk);
+      });
+      List<int> frame(int type, int flags, int streamId, List<int> payload) => [
+        payload.length >> 16, (payload.length >> 8) & 0xff, payload.length & 0xff,
+        type, flags,
+        (streamId >> 24) & 0x7f, (streamId >> 16) & 0xff, (streamId >> 8) & 0xff, streamId & 0xff,
+        ...payload,
+      ];
+      final conn = ClientTransportConnection.viaStreams(toClient.stream, fromClient.sink);
+      addTearDown(() async {
+        unawaited(conn.terminate());
+        await toClient.close();
+      });
+      // Peer: 1 MiB stream windows and a roomy connection window.
+      toClient.add(frame(4, 0, 0, const [0x00, 0x04, 0x00, 0x10, 0x00, 0x00]));
+      toClient.add(frame(8, 0, 0, const [0x00, 0xa0, 0x00, 0x00]));
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      final stream = conn.makeRequest([
+        Header.ascii(':method', 'CONNECT'),
+        Header.ascii(':authority', 'a.example:443'),
+      ]);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      writes.clear();
+
+      stream.outgoingMessages.add(DataStreamMessage(Uint8List(200 * 1024)));
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      final dataFrames = sent.frames.where((f) => f.type == 0 && f.streamId == 1).toList();
+      expect(dataFrames.fold<int>(0, (sum, f) => sum + f.length), 200 * 1024);
+      expect(dataFrames.length, greaterThanOrEqualTo(13)); // 16 KiB frames ...
+      expect(writes.length, lessThanOrEqualTo(2)); // ... in one or two writes, not 13
     });
   });
 

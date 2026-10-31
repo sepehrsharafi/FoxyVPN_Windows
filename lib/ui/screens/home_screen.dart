@@ -462,9 +462,27 @@ class SessionTimer extends StatefulWidget {
 class _SessionTimerState extends State<SessionTimer> {
   Timer? _timer;
 
+  // While the app is hidden (minimised, in the tray, an Android app in the
+  // background with the VPN on) nothing shows the timer: it stops ticking
+  // instead of waking the app every second, and catches up when shown again.
+  late final AppLifecycleListener _lifecycle;
+
+  void _onLifecycle(AppLifecycleState _) {
+    if (!mounted) return;
+    final wasTicking = _timer != null;
+    _sync();
+    if (!wasTicking && _timer != null) setState(() {}); // show the current time at once
+  }
+
+  static bool get _onScreen {
+    final state = WidgetsBinding.instance.lifecycleState;
+    return state == null || state == AppLifecycleState.resumed || state == AppLifecycleState.inactive;
+  }
+
   @override
   void initState() {
     super.initState();
+    _lifecycle = AppLifecycleListener(onStateChange: _onLifecycle);
     _sync();
   }
 
@@ -475,9 +493,9 @@ class _SessionTimerState extends State<SessionTimer> {
   }
 
   void _sync() {
-    if (widget.since != null && _timer == null) {
-      _schedule();
-    } else if (widget.since == null) {
+    if (widget.since != null && _onScreen) {
+      if (_timer == null) _schedule();
+    } else {
       _timer?.cancel();
       _timer = null;
     }
@@ -500,6 +518,7 @@ class _SessionTimerState extends State<SessionTimer> {
 
   @override
   void dispose() {
+    _lifecycle.dispose();
     _timer?.cancel();
     super.dispose();
   }

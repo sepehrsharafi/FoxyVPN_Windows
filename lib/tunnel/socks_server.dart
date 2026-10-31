@@ -258,6 +258,7 @@ class LocalSocksServer {
             log: _log,
           );
     var inflight = 0;
+    var socketErrorLogged = false;
     void handle(Datagram datagram) {
       final target = parseSocksUdpHeader(datagram.data);
       if (target == null || datagram.data.length <= target.headerLength) return;
@@ -267,11 +268,14 @@ class LocalSocksServer {
         inflight++;
         _answerDns(reply, datagram, target).whenComplete(() => inflight--);
       } else {
+        // Views, not copies: every datagram has a buffer of its own, the
+        // payload is copied into its capsule, and the header is kept for the
+        // replies.
         relay?.send(
           host: target.host,
           port: target.port,
-          header: Uint8List.fromList(datagram.data.sublist(0, target.headerLength)),
-          payload: Uint8List.fromList(datagram.data.sublist(target.headerLength)),
+          header: Uint8List.sublistView(datagram.data, 0, target.headerLength),
+          payload: Uint8List.sublistView(datagram.data, target.headerLength),
           clientAddress: datagram.address,
           clientPort: datagram.port,
         );
@@ -290,8 +294,14 @@ class LocalSocksServer {
       },
       // On Windows a datagram sent to a closed loopback port (the client's)
       // comes back as WSAECONNRESET on this socket. Harmless: the association
-      // lasts as long as its TCP control connection.
-      onError: (Object e) => _log?.call('SOCKS UDP socket error (ignored): $e'),
+      // lasts as long as its TCP control connection. It can come back for
+      // every late reply, so only the first one per association is logged
+      // (each log line is a synchronous file write on the UI isolate).
+      onError: (Object e) {
+        if (socketErrorLogged) return;
+        socketErrorLogged = true;
+        _log?.call('SOCKS UDP socket error (ignored, further ones not logged): $e');
+      },
       cancelOnError: false,
     );
     socket.add(_reply(0, address: InternetAddress.loopbackIPv4, port: udp.port));
@@ -308,11 +318,7 @@ class LocalSocksServer {
     try {
       final data = datagram.data;
       final answer = await _dns.resolve(Uint8List.sublistView(data, target.headerLength));
-      reply(
-        Uint8List.fromList([...data.sublist(0, target.headerLength), ...answer]),
-        datagram.address,
-        datagram.port,
-      );
+      reply(withSocksHeader(Uint8List.sublistView(data, 0, target.headerLength), answer), datagram.address, datagram.port);
     } catch (_) {}
   }
 }
@@ -334,17 +340,18 @@ SocksUdpTarget? parseSocksUdpHeader(Uint8List data) {
   final int headerLength;
   final String host;
   switch (data[3]) {
+    // Runs for every datagram: no intermediate lists.
     case 1:
       headerLength = 4 + 4 + 2;
-      host = data.sublist(4, 8).join('.');
+      host = '${data[4]}.${data[5]}.${data[6]}.${data[7]}';
     case 4:
       headerLength = 4 + 16 + 2;
       if (data.length < headerLength) return null;
-      host = InternetAddress.fromRawAddress(Uint8List.fromList(data.sublist(4, 20))).address;
+      host = InternetAddress.fromRawAddress(Uint8List.sublistView(data, 4, 20)).address;
     case 3:
       headerLength = 4 + 1 + data[4] + 2;
       if (data.length < headerLength) return null;
-      host = String.fromCharCodes(data.sublist(5, 5 + data[4]));
+      host = String.fromCharCodes(data, 5, 5 + data[4]);
     default:
       return null;
   }

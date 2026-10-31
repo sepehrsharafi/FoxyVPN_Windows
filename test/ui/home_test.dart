@@ -109,6 +109,36 @@ void main() {
     expect(formatSessionTime(const Duration(seconds: -3)), '00:00:00');
   });
 
+  testWidgets('the session timer rests while the app is hidden and is current again when shown', (tester) async {
+    addTearDown(() => tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed));
+    var now = DateTime(2026, 1, 1, 12, 0, 0);
+    final since = now.subtract(const Duration(seconds: 10));
+    await tester.pumpWidget(
+      Directionality(
+        textDirection: TextDirection.ltr,
+        child: SessionTimer(since: since, now: () => now),
+      ),
+    );
+    expect(find.tabular('00:00:10'), findsOneWidget);
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+    now = now.add(const Duration(seconds: 5));
+    await tester.pump(const Duration(seconds: 5));
+    expect(find.tabular('00:00:10'), findsOneWidget, reason: 'no ticks while hidden');
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(find.tabular('00:00:15'), findsOneWidget, reason: 'shown again: the current time at once');
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    now = now.add(const Duration(seconds: 1));
+    await tester.pump(const Duration(seconds: 1));
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(find.tabular('00:00:16'), findsOneWidget, reason: 'and it ticks again');
+  });
+
   testWidgets('reconnecting keeps the stats and shows the warn word', (tester) async {
     final c = FakeVpnController()
       ..connectedFor(const Duration(minutes: 3))

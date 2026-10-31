@@ -17,6 +17,10 @@ import 'queue_messages.dart';
 import 'stream_queues.dart';
 import 'window_handler.dart';
 
+/// PATCH(foxyvpn): bytes [ConnectionMessageQueueOut] hands to the frame writer
+/// per event-loop turn before it yields (see PATCHES.md (8)).
+const _kSendBudget = 256 * 1024;
+
 /// The last place before messages coming from the application get encoded and
 /// send as [Frame]s.
 ///
@@ -85,21 +89,26 @@ class ConnectionMessageQueueOut extends Object
       //     * the next message is a non-flow control message (e.g. headers)
       //     * the connection window is positive
 
-      if (_messages.isNotEmpty &&
+      bool canSend() =>
+          _messages.isNotEmpty &&
           !_frameWriter.bufferIndicator.wouldBuffer &&
           (!_connectionWindow.positiveWindow.wouldBuffer ||
-              _messages.first is! DataMessage)) {
-        _trySendMessage();
+              _messages.first is! DataMessage);
+
+      if (canSend()) {
+        // PATCH(foxyvpn): send up to [_kSendBudget] bytes per event-loop turn
+        // (the frame writer turns them into one socket write) instead of ONE
+        // message per `Timer.run()`. See PATCHES.md (8).
+        var budget = _kSendBudget;
+        do {
+          final message = _messages.first;
+          budget -= message is DataMessage ? message.bytes.length + 9 : 64;
+          _trySendMessage();
+        } while (budget > 0 && canSend());
 
         // If we have more messages and we can send them, we'll run them
         // using `Timer.run()` to let other things get in-between.
-        if (_messages.isNotEmpty &&
-            !_frameWriter.bufferIndicator.wouldBuffer &&
-            (!_connectionWindow.positiveWindow.wouldBuffer ||
-                _messages.first is! DataMessage)) {
-          // TODO: If all the frame writer methods would return the
-          // number of bytes written, we could just say, we loop here until 10kb
-          // and after words, we'll make `Timer.run()`.
+        if (canSend()) {
           Timer.run(_trySendMessages);
         } else {
           onCheckForClose();
