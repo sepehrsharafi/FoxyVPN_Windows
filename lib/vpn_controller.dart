@@ -344,6 +344,7 @@ class VpnController extends ChangeNotifier {
     _statsTimer?.cancel();
     _notifySoonTimer?.cancel();
     _stats.dispose();
+    _onScreen.dispose();
     _exitTimer?.cancel();
     _exitGeneration++;
     _phaseSub?.cancel();
@@ -740,6 +741,13 @@ class VpnController extends ChangeNotifier {
   final _StatsTick _stats = _StatsTick();
 
   bool _visible = true;
+  bool _windowShown = true;
+  final ValueNotifier<bool> _onScreen = ValueNotifier(true);
+
+  /// Whether anything is on screen: the app is in the foreground (lifecycle)
+  /// and its window is shown (not minimised or in the tray). The UI stops its
+  /// tickers and timers while this is false.
+  ValueListenable<bool> get onScreen => _onScreen;
 
   /// The UI reports when the app goes to the background and back. Nothing reads
   /// the live stats meanwhile, so their timer stops (it would otherwise wake
@@ -747,6 +755,21 @@ class VpnController extends ChangeNotifier {
   void setVisible(bool visible) {
     if (visible == _visible || _disposed) return;
     _visible = visible;
+    _applyOnScreen();
+  }
+
+  /// Windows: the window is shown, or minimised / hidden to the tray. (The
+  /// lifecycle does not change when the window is minimised.)
+  void setWindowShown(bool shown) {
+    if (shown == _windowShown || _disposed) return;
+    _windowShown = shown;
+    _applyOnScreen();
+  }
+
+  void _applyOnScreen() {
+    final visible = _visible && _windowShown;
+    if (visible == _onScreen.value) return;
+    _onScreen.value = visible;
     final session = _session;
     if (!visible) {
       _statsTimer?.cancel();
@@ -1027,7 +1050,7 @@ class VpnController extends ChangeNotifier {
     }));
     _speed.reset();
     _speed.sample(session.bytesUp, session.bytesDown, _clock()); // baseline
-    if (_visible) _statsTimer = Timer.periodic(statsInterval, (_) => _onStatsTick());
+    if (_onScreen.value) _statsTimer = Timer.periodic(statsInterval, (_) => _onStatsTick());
     _scheduleExitCheck(session);
     _connecting = false;
     _notify();

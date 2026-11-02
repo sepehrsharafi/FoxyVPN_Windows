@@ -196,13 +196,29 @@ class WindowsShell with WindowListener {
   }
 
   // Nothing on screen shows the live stats while the window is hidden (in the
-  // tray, or during a quit): their timer rests. (window_manager reports
-  // WM_SHOWWINDOW as the "show" / "hide" events, which have no own callback.)
+  // tray, or during a quit) or minimised: their timer and every animation rest.
+  // (window_manager reports WM_SHOWWINDOW as the "show" / "hide" events, which
+  // have no own callback.)
   @override
   void onWindowEvent(String eventName) {
-    if (eventName == 'show') _controller.setVisible(true);
-    if (eventName == 'hide') _controller.setVisible(false);
+    if (eventName == 'show') _controller.setWindowShown(true);
+    if (eventName == 'hide') _controller.setWindowShown(false);
   }
+
+  // Minimising does not change the app lifecycle on Windows, so it is told apart here.
+  @override
+  void onWindowMinimize() => _controller.setWindowShown(false);
+
+  @override
+  void onWindowRestore() => _controller.setWindowShown(true);
+
+  // A window minimised while maximised comes back as "maximize", not "restore";
+  // focus is the safety net, so the screen never stays frozen.
+  @override
+  void onWindowMaximize() => _controller.setWindowShown(true);
+
+  @override
+  void onWindowFocus() => _controller.setWindowShown(true);
 
   Future<void> _hideToTray() async {
     try {
@@ -210,7 +226,7 @@ class WindowsShell with WindowListener {
     } catch (e) {
       AppLog.write('Hiding the window failed: $e');
     }
-    _controller.setVisible(false);
+    _controller.setWindowShown(false);
     if (_controller.trayHintShown) return;
     try {
       final shown = await channel.invokeMethod<bool>('balloon', {

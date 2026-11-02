@@ -120,6 +120,19 @@ void main() {
       expect(c.calls, ['toggle']);
     });
 
+    test('minimise and restore tell the controller whether the window is shown', () async {
+      final c = FakeVpnController();
+      final shell = WindowsShell(c, shutdownCap: const Duration(seconds: 1), channel: channel)..start();
+      shell.onWindowMinimize();
+      expect(c.windowShown, isFalse);
+      shell.onWindowRestore();
+      expect(c.windowShown, isTrue);
+      shell.onWindowEvent('hide');
+      expect(c.windowShown, isFalse);
+      shell.onWindowEvent('show');
+      expect(c.windowShown, isTrue);
+    });
+
     test('close hides to the tray and shows the notice once', () async {
       final c = FakeVpnController();
       final shell = WindowsShell(c, shutdownCap: const Duration(seconds: 1), channel: channel)..start();

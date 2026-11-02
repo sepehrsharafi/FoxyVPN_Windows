@@ -139,6 +139,56 @@ void main() {
     expect(find.tabular('00:00:16'), findsOneWidget, reason: 'and it ticks again');
   });
 
+  testWidgets('the session timer rests while the window is not on screen', (tester) async {
+    final onScreen = ValueNotifier(true);
+    addTearDown(onScreen.dispose);
+    var now = DateTime(2026, 1, 1, 12, 0, 0);
+    final since = now.subtract(const Duration(seconds: 10));
+    await tester.pumpWidget(
+      Directionality(
+        textDirection: TextDirection.ltr,
+        child: SessionTimer(since: since, now: () => now, onScreen: onScreen),
+      ),
+    );
+    expect(find.tabular('00:00:10'), findsOneWidget);
+
+    onScreen.value = false; // minimised: the lifecycle stays resumed
+    now = now.add(const Duration(seconds: 5));
+    await tester.pump(const Duration(seconds: 5));
+    expect(find.tabular('00:00:10'), findsOneWidget, reason: 'no ticks while minimised');
+    expect(tester.binding.hasScheduledFrame, isFalse);
+
+    onScreen.value = true;
+    await tester.pump();
+    expect(find.tabular('00:00:15'), findsOneWidget, reason: 'shown again: the current time at once');
+  });
+
+  testWidgets('a second tick of the session timer costs one frame and no animation', (tester) async {
+    var now = DateTime(2026, 1, 1, 12, 0, 0);
+    final since = now.subtract(const Duration(seconds: 10));
+    await tester.pumpWidget(
+      Directionality(
+        textDirection: TextDirection.ltr,
+        child: SessionTimer(since: since, now: () => now),
+      ),
+    );
+    now = now.add(const Duration(seconds: 1));
+    await tester.pump(const Duration(milliseconds: 1010));
+    expect(find.tabular('00:00:11'), findsOneWidget);
+    expect(tester.binding.hasScheduledFrame, isFalse);
+  });
+
+  testWidgets('odometer text with a zero duration changes without running an animation', (tester) async {
+    Widget app(String text) => Directionality(
+      textDirection: TextDirection.ltr,
+      child: OdometerText(text, style: const TextStyle(fontSize: 20), duration: Duration.zero),
+    );
+    await tester.pumpWidget(app('12:34'));
+    await tester.pumpWidget(app('12:35'));
+    expect(find.tabular('12:35'), findsOneWidget);
+    expect(tester.binding.hasScheduledFrame, isFalse);
+  });
+
   testWidgets('reconnecting keeps the stats and shows the warn word', (tester) async {
     final c = FakeVpnController()
       ..connectedFor(const Duration(minutes: 3))

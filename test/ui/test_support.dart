@@ -219,6 +219,19 @@ class FakeVpnController extends ChangeNotifier implements VpnController {
   void setVisible(bool visible) {}
 
   @override
+  void setWindowShown(bool shown) {
+    windowShown = shown;
+    _onScreen.value = shown;
+  }
+
+  /// Last value reported by [setWindowShown].
+  bool windowShown = true;
+
+  @override
+  ValueListenable<bool> get onScreen => _onScreen;
+  final _onScreen = ValueNotifier(true);
+
+  @override
   bool get loadingLocations => _loading;
 
   @override

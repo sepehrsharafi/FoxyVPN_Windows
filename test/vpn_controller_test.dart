@@ -621,6 +621,30 @@ void main() {
       await c.disconnect();
     });
 
+    test('on screen needs the app in the foreground and the window shown; the stats timer follows it', () async {
+      final c = build();
+      await c.init();
+      await c.connect();
+      expect(c.onScreen.value, isTrue);
+      var ticks = 0;
+      c.stats.addListener(() => ticks++);
+
+      c.setWindowShown(false); // minimised: the lifecycle does not change
+      expect(c.onScreen.value, isFalse);
+      await pause(30);
+      final rested = ticks;
+      await pause(60);
+      expect(ticks, rested, reason: 'no stats ticks while minimised');
+
+      c.setVisible(false);
+      c.setWindowShown(true);
+      expect(c.onScreen.value, isFalse, reason: 'still in the background');
+      c.setVisible(true);
+      expect(c.onScreen.value, isTrue);
+      expect(ticks, greaterThan(rested), reason: 'shown again: a tick at once');
+      await c.disconnect();
+    });
+
     test('the exit IP and country are fetched once after connecting and cleared on disconnect', () async {
       Duration? usedTimeout;
       String? usedHost;

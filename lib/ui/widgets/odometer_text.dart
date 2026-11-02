@@ -9,6 +9,8 @@ import 'tabular_text.dart';
 /// small controller each, idle otherwise), and the motion is a translate
 /// inside a clip plus a colour fade, so it never lays anything out again.
 /// Digits are keyed from the right, so "9:59" to "10:00" keeps every place.
+/// With a zero [duration] (or animations turned off) there is no roll and no
+/// controller at all: a change costs exactly one frame.
 class OdometerText extends StatelessWidget {
   const OdometerText(
     this.text, {
@@ -49,7 +51,7 @@ class OdometerText extends StatelessWidget {
     final scaler = textScaler ?? MediaQuery.textScalerOf(context);
     final cell = TabularText.cellWidth(style, scaler);
     final height = lineHeight(style, scaler);
-    final animate = !MediaQuery.disableAnimationsOf(context);
+    final animate = !MediaQuery.disableAnimationsOf(context) && duration > Duration.zero;
     final runes = text.runes.toList();
     return Semantics(
       label: semanticLabel ?? text,
@@ -58,7 +60,15 @@ class OdometerText extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           for (var i = 0; i < runes.length; i++)
-            if (_isDigit(runes[i]))
+            if (_isDigit(runes[i]) && !animate)
+              // No roll: a plain glyph, no controller, so a change is one frame.
+              SizedBox(
+                key: ValueKey(runes.length - i),
+                width: cell,
+                height: height,
+                child: Center(child: Text(String.fromCharCode(runes[i]), textScaler: scaler, softWrap: false, style: style)),
+              )
+            else if (_isDigit(runes[i]))
               _RollingDigit(
                 key: ValueKey(runes.length - i),
                 digit: runes[i] - 0x30,
@@ -66,7 +76,7 @@ class OdometerText extends StatelessWidget {
                 scaler: scaler,
                 width: cell,
                 height: height,
-                duration: animate ? duration : Duration.zero,
+                duration: duration,
               )
             else
               Text(String.fromCharCode(runes[i]), textScaler: scaler, style: style, softWrap: false),

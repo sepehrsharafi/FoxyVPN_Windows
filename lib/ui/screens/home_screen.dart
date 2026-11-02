@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
 
 import '../../format.dart';
@@ -388,7 +389,7 @@ class _TimerBlock extends StatelessWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          SessionTimer(since: live ? c.connectedSince : null),
+          SessionTimer(since: live ? c.connectedSince : null, onScreen: c.onScreen),
           const SizedBox(height: 8),
           AnimatedSwitcher(
             duration: FoxySpace.base,
@@ -444,13 +445,18 @@ String formatSessionTime(Duration d) {
   return '${two(d.inHours)}:${two(d.inMinutes.remainder(60))}:${two(d.inSeconds.remainder(60))}';
 }
 
-/// The big timer: ticks once a second since [since], each changed digit
-/// rolling in like an odometer; `00:00:00` in a dim tone when there is no
-/// session. It ignores the text scale (it is already large).
+/// The big timer: ticks once a second since [since], without a roll (a roll
+/// would keep the screen redrawing about 28 times a second); `00:00:00` in a
+/// dim tone when there is no session. It ignores the text scale (it is
+/// already large).
 class SessionTimer extends StatefulWidget {
-  const SessionTimer({super.key, this.since, this.now});
+  const SessionTimer({super.key, this.since, this.now, this.onScreen});
 
   final DateTime? since;
+
+  /// Whether the window is shown (minimised does not change the app lifecycle
+  /// on Windows); the timer rests while it is false. Null: lifecycle only.
+  final ValueListenable<bool>? onScreen;
 
   /// Clock override for tests.
   final DateTime Function()? now;
@@ -474,21 +480,29 @@ class _SessionTimerState extends State<SessionTimer> {
     if (!wasTicking && _timer != null) setState(() {}); // show the current time at once
   }
 
-  static bool get _onScreen {
+  bool get _onScreen {
     final state = WidgetsBinding.instance.lifecycleState;
-    return state == null || state == AppLifecycleState.resumed || state == AppLifecycleState.inactive;
+    final foreground = state == null || state == AppLifecycleState.resumed || state == AppLifecycleState.inactive;
+    return foreground && (widget.onScreen?.value ?? true);
   }
+
+  void _onWindow() => _onLifecycle(AppLifecycleState.resumed);
 
   @override
   void initState() {
     super.initState();
     _lifecycle = AppLifecycleListener(onStateChange: _onLifecycle);
+    widget.onScreen?.addListener(_onWindow);
     _sync();
   }
 
   @override
   void didUpdateWidget(SessionTimer old) {
     super.didUpdateWidget(old);
+    if (old.onScreen != widget.onScreen) {
+      old.onScreen?.removeListener(_onWindow);
+      widget.onScreen?.addListener(_onWindow);
+    }
     _sync();
   }
 
@@ -519,6 +533,7 @@ class _SessionTimerState extends State<SessionTimer> {
   @override
   void dispose() {
     _lifecycle.dispose();
+    widget.onScreen?.removeListener(_onWindow);
     _timer?.cancel();
     super.dispose();
   }
@@ -536,6 +551,7 @@ class _SessionTimerState extends State<SessionTimer> {
           child: OdometerText(
             text,
             textScaler: TextScaler.noScaling,
+            duration: Duration.zero,
             semanticLabel: since == null ? 'No active session' : 'Connected for $text',
             style: FoxyText.timer.copyWith(color: since == null ? FoxyColors.textFaint : FoxyColors.text),
           ),

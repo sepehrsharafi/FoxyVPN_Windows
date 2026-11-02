@@ -39,18 +39,23 @@ class FoxyApp extends StatelessWidget {
         final media = MediaQuery.of(context);
         return MediaQuery(
           data: media.copyWith(textScaler: media.textScaler.clamp(maxScaleFactor: maxTextScale)),
-          child: ColoredBox(
-            color: FoxyColors.bg,
-            child: Host.isAndroid
-                // Phones: no title bar. Edge to edge, content kept clear of the
-                // status bar, the navigation bar / gesture area and the cutout.
-                ? AndroidFrame(child: child ?? const SizedBox.shrink())
-                : Column(
-                    children: [
-                      const TitleBar(),
-                      Expanded(child: ClipRect(child: child ?? const SizedBox.shrink())),
-                    ],
-                  ),
+          // Minimised or in the tray: mute every ticker, so no frames are made.
+          child: ValueListenableBuilder<bool>(
+            valueListenable: controller.onScreen,
+            builder: (context, onScreen, content) => TickerMode(enabled: onScreen, child: content!),
+            child: ColoredBox(
+              color: FoxyColors.bg,
+              child: Host.isAndroid
+                  // Phones: no title bar. Edge to edge, content kept clear of the
+                  // status bar, the navigation bar / gesture area and the cutout.
+                  ? AndroidFrame(child: child ?? const SizedBox.shrink())
+                  : Column(
+                      children: [
+                        const TitleBar(),
+                        Expanded(child: ClipRect(child: child ?? const SizedBox.shrink())),
+                      ],
+                    ),
+            ),
           ),
         );
       },
