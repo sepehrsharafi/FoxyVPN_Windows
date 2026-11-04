@@ -156,6 +156,17 @@ func connect(c net.Conn, host string, port int) {
 		reply(c, 8, nil) // names are never sent by tun2socks; refuse rather than resolve through the tunnel
 		return
 	}
+	if port == 80 {
+		// Answered here: proves the request went through utun -> tun2socks -> SOCKS
+		// without depending on the CI VM letting interface-pinned sockets out.
+		reply(c, 0, nil)
+		_ = c.SetDeadline(time.Now().Add(10 * time.Second))
+		buf := make([]byte, 4096)
+		_, _ = c.Read(buf)
+		body := "FOXY-TUNNEL-OK\n"
+		_, _ = fmt.Fprintf(c, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", len(body), body)
+		return
+	}
 	d := net.Dialer{Timeout: 10 * time.Second, Control: pin}
 	up, err := d.Dial("tcp", target)
 	if err != nil {

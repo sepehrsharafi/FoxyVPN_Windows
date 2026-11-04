@@ -200,12 +200,13 @@ check_tunnel_is_up() {
 
 check_traffic() {
     : > "$WORK/socks.log"
-    /usr/bin/curl -sS --max-time 15 -o /dev/null https://example.com || fail "curl https://example.com failed through the tunnel"
-    if /usr/bin/grep -q 'CONNECT .*:443' "$WORK/socks.log"; then
-        pass "curl worked and the fake SOCKS server saw the HTTPS connection: $(/usr/bin/grep 'CONNECT .*:443' "$WORK/socks.log" | /usr/bin/head -n 1)"
-    else
-        fail "curl worked but the fake SOCKS server saw no CONNECT to :443 (traffic did not go through the tunnel)"
-    fi
+    # Port 80 is answered by the fake server itself with a marker, so getting
+    # the marker back proves name lookup and TCP both went through the tunnel.
+    BODY="$(/usr/bin/curl -sS --max-time 15 http://example.com/ 2>&1)" || fail "curl http://example.com failed through the tunnel: $BODY"
+    case "$BODY" in
+        *FOXY-TUNNEL-OK*) pass "curl got the fake SOCKS server's answer: TCP went through the tunnel ($(/usr/bin/grep 'CONNECT .*:80' "$WORK/socks.log" | /usr/bin/head -n 1))" ;;
+        *) fail "curl did not get the fake SOCKS server's answer (traffic bypassed the tunnel): $BODY" ;;
+    esac
     if /usr/bin/grep -q 'DNS example.com' "$WORK/socks.log"; then
         pass "the DNS query for example.com went through the tunnel"
     else
