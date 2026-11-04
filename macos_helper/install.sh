@@ -33,7 +33,16 @@ for f in foxyvpn-helper tun2socks com.foxyvpn.helper.plist; do
 done
 
 # Stop a running helper first: on SIGTERM it restores DNS and routes. Wait for its socket to go.
+# launchd may still be stopping the job when bootout returns: wait until it is
+# really gone (up to 10 s), retrying once by plist path, so the bootstrap below
+# never races the old job.
 /bin/launchctl bootout "system/$LABEL" >/dev/null 2>&1 || true
+n=0
+while /bin/launchctl print "system/$LABEL" >/dev/null 2>&1 && [ "$n" -lt 40 ]; do
+    if [ "$n" -eq 8 ] && [ -f "$PLIST_DEST" ]; then /bin/launchctl bootout system "$PLIST_DEST" >/dev/null 2>&1 || true; fi
+    /bin/sleep 0.25
+    n=$((n + 1))
+done
 i=0
 while [ -S "$SOCKET" ] && [ "$i" -lt 20 ]; do
     /bin/sleep 0.25

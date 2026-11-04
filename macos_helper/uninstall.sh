@@ -18,6 +18,14 @@ fi
 
 # bootout first: the helper restores DNS and routes on SIGTERM. Wait for its socket to go away.
 /bin/launchctl bootout "system/$LABEL" >/dev/null 2>&1 || true
+# launchd may still be stopping the job when bootout returns: wait until it is
+# really gone (up to 10 s), retrying once by plist path.
+n=0
+while /bin/launchctl print "system/$LABEL" >/dev/null 2>&1 && [ "$n" -lt 40 ]; do
+    if [ "$n" -eq 8 ] && [ -f "$PLIST" ]; then /bin/launchctl bootout system "$PLIST" >/dev/null 2>&1 || true; fi
+    /bin/sleep 0.25
+    n=$((n + 1))
+done
 i=0
 while [ -S "$SOCKET" ] && [ "$i" -lt 20 ]; do
     /bin/sleep 0.25

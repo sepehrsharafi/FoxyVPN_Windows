@@ -240,6 +240,13 @@ check_traffic
 wait "$CLIENT_PID" 2>/dev/null; CLIENT_PID=""
 check_restored 5
 
+# ---------------------------------------------------------------- upgrade
+# An app update re-runs install.sh over a running helper.
+/bin/sh "$APP/Contents/Resources/helper/install.sh" "$APP" || fail "re-running install.sh (upgrade) failed"
+wait_for 10 "socket after upgrade" test -S "$SOCKET" || fail "no socket after the upgrade"
+OUT="$("$CLIENT" probe "$SOCKET" 2>&1)"
+case "$OUT" in *'"ok":true'*) pass "upgrade: the helper came back and answers" ;; *) fail "after the upgrade the helper did not answer: $OUT" ;; esac
+
 # ---------------------------------------------------------------- uninstall
 /bin/rm -f "$CLIENT"
 /bin/sh "$APP/Contents/Resources/helper/uninstall.sh" || fail "uninstall.sh failed"
@@ -249,7 +256,10 @@ wait_for 5 "socket gone" test ! -S "$SOCKET" || fail "socket still exists after 
 [ ! -e /Library/PrivilegedHelperTools/com.foxyvpn.helper ] || fail "helper binary still exists after uninstall"
 [ ! -e "$SUPPORT/tun2socks" ] && [ ! -e "$SUPPORT/helper.json" ] && [ ! -e "$SUPPORT/state.json" ] && [ ! -e "$SUPPORT/helper.log" ] \
     || fail "support files still exist after uninstall"
-if /bin/launchctl print system/com.foxyvpn.helper >/dev/null 2>&1; then fail "the launchd job is still loaded"; fi
+if /bin/launchctl print system/com.foxyvpn.helper >/dev/null 2>&1; then
+    /bin/launchctl print system/com.foxyvpn.helper 2>&1 | /usr/bin/head -n 25
+    fail "the launchd job is still loaded"
+fi
 dns_restored || fail "DNS differs after uninstall"
 pass "uninstalled cleanly"
 exit 0
