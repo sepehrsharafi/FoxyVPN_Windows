@@ -127,11 +127,8 @@ class VpnSession {
   /// A plain HTTPS GET to [host] whose TCP connection is dialled through the
   /// tunnel (so the server sees the exit IP). Returns the body of a 200 answer;
   /// throws otherwise, and on timeout.
-  Future<String> httpsGetThroughTunnel(
-    String host,
-    String path, {
-    Duration timeout = const Duration(seconds: 10),
-  }) => httpsGetVia(_dial, host, path, timeout: timeout);
+  Future<String> httpsGetThroughTunnel(String host, String path, {Duration timeout = const Duration(seconds: 10)}) =>
+      httpsGetVia(_dial, host, path, timeout: timeout);
 
   Future<void> stop() async {
     if (_stopped) return;
@@ -155,7 +152,9 @@ class VpnSession {
 
   Future<void> _start(Location location) async {
     final pass = await _account.proxyPass();
-    if (pass.quotaRemaining != null && pass.quotaRemaining! <= 0) throw QuotaExceeded();
+    if (pass.quotaRemaining != null && pass.quotaRemaining! <= 0) {
+      throw QuotaExceeded(quotaMax: pass.quotaMax, quotaResetsAt: pass.quotaResetsAt);
+    }
     _applyPass(pass);
 
     Object? lastFailure;
@@ -211,9 +210,7 @@ class VpnSession {
     _bytesAtFetch = _stopped || !_socksReady ? 0 : bytesUp + bytesDown;
     _upstream?.updateToken(pass.token);
     final expiry = pass.expiresAt;
-    var wait = expiry == null
-        ? _unknownExpiryRenewal
-        : expiry.difference(DateTime.now()) - _renewMargin;
+    var wait = expiry == null ? _unknownExpiryRenewal : expiry.difference(DateTime.now()) - _renewMargin;
     if (wait < const Duration(minutes: 1)) wait = const Duration(minutes: 1);
     _renewTimer?.cancel();
     _renewTimer = Timer(wait, _renewPass);
@@ -229,6 +226,10 @@ class VpnSession {
       _applyPass(await _account.proxyPass());
       _log?.call('Renewed proxy pass');
     } on QuotaExceeded catch (e) {
+      // So the controller, which keeps this session's estimate, learns "used up".
+      _quotaAtFetch = 0;
+      _quotaMax = e.quotaMax ?? _quotaMax;
+      _quotaResetsAt = e.quotaResetsAt ?? _quotaResetsAt;
       _fail(e.message);
     } on GuardianError catch (e) {
       if (e.statusCode == 401 || e.statusCode == 403) {
@@ -253,12 +254,10 @@ class VpnSession {
     _renewTimer = Timer(const Duration(seconds: 30), _renewPass);
   }
 
-  Future<TunnelStream> _dial(String host, int port) =>
-      _dialVia((upstream) => upstream.open(host, port));
+  Future<TunnelStream> _dial(String host, int port) => _dialVia((upstream) => upstream.open(host, port));
 
   /// A CONNECT-UDP flow, authenticated with the pass current at this moment.
-  Future<TunnelStream> _dialUdp(String host, int port) =>
-      _dialVia((upstream) => upstream.openUdp(host, port));
+  Future<TunnelStream> _dialUdp(String host, int port) => _dialVia((upstream) => upstream.openUdp(host, port));
 
   Future<TunnelStream> _dialVia(Future<TunnelStream> Function(UpstreamSession) open) async {
     var retriedToken = false;
@@ -307,12 +306,7 @@ class VpnSession {
 
   Future<UpstreamSession> _doRotate(UpstreamSession old) async {
     _log?.call('Upstream is draining (GOAWAY), opening a fresh connection');
-    final fresh = await connector(
-      _node,
-      token: _token,
-      pinnedAddress: _pinned,
-      timeout: _connectTimeout,
-    );
+    final fresh = await connector(_node, token: _token, pinnedAddress: _pinned, timeout: _connectTimeout);
     if (_stopped || !identical(_upstream, old)) {
       await fresh.close();
       throw const SocketException('Upstream connection changed while rotating.');
@@ -348,12 +342,7 @@ class VpnSession {
           }
           if (_stopped) break;
         }
-        final upstream = await connector(
-          _node,
-          token: _token,
-          pinnedAddress: _pinned,
-          timeout: _connectTimeout,
-        );
+        final upstream = await connector(_node, token: _token, pinnedAddress: _pinned, timeout: _connectTimeout);
         if (_stopped) {
           await upstream.close();
           break;

@@ -51,7 +51,6 @@ class FakeAccount extends Account {
   }
 }
 
-
 class _FakeSession implements VpnSession {
   _FakeSession(this._events);
   final List<String> _events;
@@ -72,10 +71,10 @@ class _FakeSession implements VpnSession {
 
   @override
   Stream<VpnPhase> get phases => Stream.multi((c) {
-        c.add(phase);
-        final sub = _phaseChanges.stream.listen(c.add);
-        c.onCancel = sub.cancel;
-      });
+    c.add(phase);
+    final sub = _phaseChanges.stream.listen(c.add);
+    c.onCancel = sub.cancel;
+  });
 
   @override
   String? get lastError => null;
@@ -88,12 +87,11 @@ class _FakeSession implements VpnSession {
 
   /// Answers of the exit check; a throwing or slow fake can replace it.
   int traceCalls = 0;
-  Future<String> Function(String host, String path, Duration timeout) trace =
-      (_, _, _) async => 'fl=1\nip=198.51.100.7\nloc=AT\n';
+  Future<String> Function(String host, String path, Duration timeout) trace = (_, _, _) async =>
+      'fl=1\nip=198.51.100.7\nloc=AT\n';
 
   @override
-  Future<String> httpsGetThroughTunnel(String host, String path,
-      {Duration timeout = const Duration(seconds: 10)}) {
+  Future<String> httpsGetThroughTunnel(String host, String path, {Duration timeout = const Duration(seconds: 10)}) {
     traceCalls++;
     return trace(host, path, timeout);
   }
@@ -136,12 +134,12 @@ class _FakeTun implements WindowsTun {
 }
 
 Location loc(String country, String city) => Location(
-      countryCode: country,
-      countryName: country,
-      cityCode: city,
-      cityName: city,
-      servers: [ServerNode('$city.example.com', 443)],
-    );
+  countryCode: country,
+  countryName: country,
+  cityCode: city,
+  cityName: city,
+  servers: [ServerNode('$city.example.com', 443)],
+);
 
 /// An upstream connector that always fails, after [delay].
 UpstreamConnector failingConnector({Duration delay = Duration.zero}) =>
@@ -168,15 +166,14 @@ void main() {
     Future<void> Function()? cleanup,
     Future<List<Location>> Function()? load,
     Future<List<String>> Function()? conflicts,
-  }) =>
-      VpnController(
-        account: account,
-        settings: settings,
-        cleanup: cleanup ?? () async {},
-        loadLocations: load ?? () async => [tokyo, berlin, rec, paris],
-        ping: (node) async => pings[node.host],
-        detectConflicts: conflicts ?? () async => const [],
-      );
+  }) => VpnController(
+    account: account,
+    settings: settings,
+    cleanup: cleanup ?? () async {},
+    loadLocations: load ?? () async => [tokyo, berlin, rec, paris],
+    ping: (node) async => pings[node.host],
+    detectConflicts: conflicts ?? () async => const [],
+  );
 
   setUp(() {
     dir = Directory.systemTemp.createTempSync('foxy_ctl');
@@ -346,10 +343,12 @@ void main() {
 
   test('locations failing to load show an error and can be retried', () async {
     var fail = true;
-    final c = make(load: () async {
-      if (fail) throw const SocketException('no network');
-      return [rec, berlin];
-    });
+    final c = make(
+      load: () async {
+        if (fail) throw const SocketException('no network');
+        return [rec, berlin];
+      },
+    );
     await c.init();
     expect(c.locationsError, contains('Could not load locations'));
     expect(c.locations, isEmpty);
@@ -411,6 +410,37 @@ void main() {
     expect(c.quotaRemaining, isNull);
   });
 
+  test('a 429 on the account check means the data is used up, not an account error', () async {
+    account.passError = QuotaExceeded();
+    final c = make();
+    await c.init();
+    expect(c.quotaRemaining, 0);
+    expect(c.quotaMax, isNull);
+    expect(c.accountError, isNull);
+    expect(c.signedIn, isTrue);
+  });
+
+  test('a 429 keeps the allowance and reset date the response carried', () async {
+    final resets = DateTime(2026, 12, 1);
+    account.passError = QuotaExceeded(quotaMax: 50000, quotaResetsAt: resets);
+    final c = make();
+    await c.init();
+    expect(c.quotaRemaining, 0);
+    expect(c.quotaMax, 50000);
+    expect(c.quotaResetsAt, resets);
+  });
+
+  test('a 429 while connecting records the quota as used up', () async {
+    final c = make();
+    await c.init();
+    expect(c.quotaRemaining, 40000);
+    account.passError = QuotaExceeded(quotaMax: 50000);
+    await c.connect();
+    expect(c.quotaRemaining, 0);
+    expect(c.quotaMax, 50000);
+    expect(c.error, contains('used up'));
+  });
+
   test('shutdown with nothing running returns, and connecting is refused afterwards', () async {
     final c = make();
     await c.init();
@@ -438,10 +468,12 @@ void main() {
     test('are read at init, shown as sentences, and unchanged results do not notify', () async {
       var calls = 0;
       var found = ['Another VPN (wg0) is connected.'];
-      final c = make(conflicts: () async {
-        calls++;
-        return [...found];
-      });
+      final c = make(
+        conflicts: () async {
+          calls++;
+          return [...found];
+        },
+      );
       expect(c.conflicts, isEmpty);
       await c.init();
       expect(calls, 1);
@@ -461,10 +493,12 @@ void main() {
 
     test('are looked at again after a connect attempt (not during it)', () async {
       var calls = 0;
-      final c = make(conflicts: () async {
-        calls++;
-        return calls == 1 ? [] : ['A proxy is set.'];
-      });
+      final c = make(
+        conflicts: () async {
+          calls++;
+          return calls == 1 ? [] : ['A proxy is set.'];
+        },
+      );
       await c.init();
       expect(c.conflicts, isEmpty);
       await c.connect(); // fails (no server), but the check ran
@@ -475,10 +509,12 @@ void main() {
 
     test('a failing check is logged, keeps the old list and does not break init or connect', () async {
       var fail = false;
-      final c = make(conflicts: () async {
-        if (fail) throw StateError('boom');
-        return ['x'];
-      });
+      final c = make(
+        conflicts: () async {
+          if (fail) throw StateError('boom');
+          return ['x'];
+        },
+      );
       await c.init();
       fail = true;
       await c.refreshConflicts();
@@ -491,10 +527,12 @@ void main() {
     test('a second request while one runs joins it', () async {
       var calls = 0;
       final gate = Completer<List<String>>();
-      final c = make(conflicts: () {
-        calls++;
-        return gate.future;
-      });
+      final c = make(
+        conflicts: () {
+          calls++;
+          return gate.future;
+        },
+      );
       final a = c.refreshConflicts();
       final b = c.refreshConflicts();
       gate.complete(['y']);

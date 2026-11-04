@@ -166,7 +166,12 @@ Top to bottom:
 - Header: back arrow, title "Account".
 - Identity card (radius 20): avatar letter, email, caption "Firefox account".
 - Data card: a slim 6 px bar of remaining / total in `accent` on `line`, "11.0 GB left of 50 GB",
-  "Resets 1 Nov". Hide the parts Mozilla didn't send.
+  "Resets 1 Nov". Hide the parts Mozilla didn't send. The card is always there (nothing shifts):
+  with no figures yet it reads "Data left" / "Not known yet" (`textFaint`, no bar). Used up (also after a
+  fresh start, from Mozilla's 429): a `danger`-tinted 40 px circle with the alert glyph, "No data left"
+  in `danger`, "You've used all 50 GB this month.", an empty bar, "Resets 1 Nov — FoxyVPN works again then."
+- The page never scrolls when it fits (400 × 720 window, phones); it scrolls only when the content is
+  genuinely taller (small phone with 1.3× text), with Sign out and Version pinned to the bottom otherwise.
 - "Allow apps the VPN can't carry" switch row (track `line` off / `accent` on), applies on the next connect.
 - List rows: "Open log", "Licenses" (Flutter's `LicensePage`, styled dark, includes Urbanist and the flags),
   and at the bottom a `danger` text row "Sign out" (disabled while connected, with a caption saying why).

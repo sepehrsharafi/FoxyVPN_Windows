@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:foxyvpn/format.dart';
+import 'package:foxyvpn/ui/widgets/foxy_icon.dart';
 import 'package:foxyvpn/vpn_controller.dart';
 
 import 'test_support.dart';
@@ -63,8 +64,122 @@ void main() {
       ..quotaRemaining = 0;
     await openAccount(tester, c);
     expect(find.text('Signed in'), findsOneWidget);
-    expect(find.text('No data left of 50.0 GB'), findsOneWidget);
+    expect(find.text('No data left'), findsOneWidget);
     expect(tester.takeException(), isNull);
+  });
+
+  group('data card', () {
+    testWidgets('used up: headline, explanation, empty bar and the reset date', (tester) async {
+      final c = FakeVpnController()..quotaRemaining = 0;
+      await openAccount(tester, c);
+      expect(find.text('No data left'), findsOneWidget);
+      expect(find.text('You\'ve used all 50.0 GB this month.'), findsOneWidget);
+      expect(find.text('Resets ${formatResetDate(c.quotaResetsAt!)} — FoxyVPN works again then.'), findsOneWidget);
+      expect(find.byType(FoxyIcon), findsWidgets);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('used up, allowance and reset date unknown', (tester) async {
+      final c = FakeVpnController()
+        ..quotaRemaining = 0
+        ..quotaMax = null
+        ..quotaResetsAt = null;
+      await openAccount(tester, c);
+      expect(find.text('No data left'), findsOneWidget);
+      expect(find.text('You\'ve used this month\'s free data.'), findsOneWidget);
+      expect(find.text('Mozilla resets it at the start of each month.'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('unknown: the card keeps its place', (tester) async {
+      final c = FakeVpnController()
+        ..quotaRemaining = null
+        ..quotaMax = null
+        ..quotaResetsAt = null;
+      await openAccount(tester, c);
+      expect(find.text('Data left'), findsOneWidget);
+      expect(find.text('Not known yet'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+
+    for (final scale in [1.0, 1.3]) {
+      testWidgets('all three states fit at ${scale}x text on a small phone', (tester) async {
+        final c = FakeVpnController();
+        await pumpPhone(tester, c, textScale: scale);
+        await tapAndSlide(tester, find.byTooltip('Account'));
+        for (final set in <void Function(FakeVpnController)>[
+          (c) => c.quotaRemaining = 0,
+          (c) {
+            c.quotaRemaining = null;
+            c.quotaMax = null;
+            c.quotaResetsAt = null;
+          },
+          (c) {
+            c.quotaRemaining = 11 * 1024 * 1024 * 1024;
+            c.quotaMax = 50 * 1024 * 1024 * 1024;
+            c.quotaResetsAt = DateTime(2026, 11, 1);
+          },
+        ]) {
+          c.update(set);
+          await tester.pump(const Duration(milliseconds: 300));
+          expect(tester.takeException(), isNull);
+        }
+      });
+    }
+  });
+
+  group('scrolling', () {
+    double maxExtent(WidgetTester tester) {
+      final scrollable = find.descendant(of: find.byType(Scaffold).last, matching: find.byType(Scrollable));
+      return tester.state<ScrollableState>(scrollable.first).position.maxScrollExtent;
+    }
+
+    testWidgets('desktop 400x720 does not scroll (with or without the data figures)', (tester) async {
+      final c = FakeVpnController();
+      await openAccount(tester, c);
+      expect(maxExtent(tester), 0);
+      c.update((c) => c.quotaRemaining = null);
+      c.update((c) {
+        c.quotaMax = null;
+        c.quotaResetsAt = null;
+      });
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.text('Not known yet'), findsOneWidget);
+      expect(maxExtent(tester), 0);
+      c.update((c) => c.quotaRemaining = 0);
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(maxExtent(tester), 0);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('Android 412x915 does not scroll (with or without the data figures)', (tester) async {
+      final c = FakeVpnController();
+      await pumpPhone(tester, c, size: const Size(412, 915));
+      await tapAndSlide(tester, find.byTooltip('Account'));
+      expect(find.text('Firefox account'), findsOneWidget);
+      expect(maxExtent(tester), 0);
+      c.update((c) {
+        c.quotaRemaining = null;
+        c.quotaMax = null;
+        c.quotaResetsAt = null;
+      });
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(maxExtent(tester), 0);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('360x640 at 1.3x text: nothing overflows, Sign out is reachable by scrolling', (tester) async {
+      final c = FakeVpnController()..quotaRemaining = 0;
+      await pumpPhone(tester, c, textScale: 1.3);
+      await tapAndSlide(tester, find.byTooltip('Account'));
+      expect(find.text('Firefox account'), findsOneWidget);
+      await tester.ensureVisible(find.text('Sign out'));
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+      await tester.ensureVisible(find.text('Version 0.1.0'));
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+    });
   });
 
   testWidgets('a long email and a huge quota do not overflow', (tester) async {

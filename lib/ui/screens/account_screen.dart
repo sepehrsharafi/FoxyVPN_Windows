@@ -71,79 +71,86 @@ class _AccountScreenState extends State<AccountScreen> {
               children: [
                 const PageHeader(title: 'Account'),
                 Expanded(
-                  child: CustomScrollView(
-                    slivers: [
-                      SliverPadding(
-                        padding: const EdgeInsets.fromLTRB(FoxySpace.screen, 8, FoxySpace.screen, 16),
-                        sliver: SliverFillRemaining(
-                          hasScrollBody: false,
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.stretch,
-                            children: [
-                              _IdentityCard(email: controller.email),
-                              _DataCard(
-                                remaining: controller.quotaRemaining,
-                                max: controller.quotaMax,
-                                resetsAt: controller.quotaResetsAt,
-                              ),
-                              const SizedBox(height: 12),
-                              // Android: the app itself is outside the VPN, but v1 does not
-                              // offer "direct" connections for blocked ports there.
-                              if (!Host.isAndroid) ...[
-                                _DirectFallbackCard(
-                                  value: controller.directFallback,
-                                  showNextTimeNote: !idle,
-                                  onChanged: (v) => unawaited(controller.setDirectFallback(v)),
+                  // Fills the page exactly when it fits (no scrolling at all); only
+                  // scrolls when the content really is taller (small phone, big text).
+                  child: LayoutBuilder(
+                    builder: (context, constraints) => SingleChildScrollView(
+                      physics: const ClampingScrollPhysics(),
+                      child: ConstrainedBox(
+                        constraints: BoxConstraints(minHeight: constraints.maxHeight),
+                        child: IntrinsicHeight(
+                          child: Padding(
+                            padding: const EdgeInsets.fromLTRB(FoxySpace.screen, 8, FoxySpace.screen, 16),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
+                                _IdentityCard(email: controller.email),
+                                _DataCard(
+                                  remaining: controller.quotaRemaining,
+                                  max: controller.quotaMax,
+                                  resetsAt: controller.quotaResetsAt,
                                 ),
                                 const SizedBox(height: 12),
-                              ],
-                              AppCard(
-                                padding: EdgeInsets.zero,
-                                child: Column(
-                                  children: [
-                                    // Desktop: closing the window hides FoxyVPN to the
-                                    // notification area / menu bar (lib/platform/windows_tray.dart).
-                                    if (Host.isDesktop) ...[
-                                      _SwitchRow(
-                                        icon: FoxyIcons.minimize,
-                                        label: Host.isMacOS
-                                            ? 'Keep running in the menu bar when closed'
-                                            : 'Run in the tray when closed',
-                                        value: controller.keepInTray,
-                                        onChanged: (v) => unawaited(controller.setKeepInTray(v)),
+                                // Android: the app itself is outside the VPN, but v1 does not
+                                // offer "direct" connections for blocked ports there.
+                                if (!Host.isAndroid) ...[
+                                  _DirectFallbackCard(
+                                    value: controller.directFallback,
+                                    showNextTimeNote: !idle,
+                                    onChanged: (v) => unawaited(controller.setDirectFallback(v)),
+                                  ),
+                                  const SizedBox(height: 12),
+                                ],
+                                AppCard(
+                                  padding: EdgeInsets.zero,
+                                  child: Column(
+                                    children: [
+                                      // Desktop: closing the window hides FoxyVPN to the
+                                      // notification area / menu bar (lib/platform/windows_tray.dart).
+                                      if (Host.isDesktop) ...[
+                                        _SwitchRow(
+                                          icon: FoxyIcons.minimize,
+                                          label: Host.isMacOS
+                                              ? 'Keep running in the menu bar when closed'
+                                              : 'Run in the tray when closed',
+                                          value: controller.keepInTray,
+                                          onChanged: (v) => unawaited(controller.setKeepInTray(v)),
+                                        ),
+                                        const Divider(height: 1, indent: 52),
+                                      ],
+                                      _ActionRow(
+                                        icon: FoxyIcons.doc,
+                                        label: 'Open log',
+                                        // Windows: Notepad. macOS: the text editor. Android: a page in the app.
+                                        onTap: Host.isAndroid ? () => _openLog(context) : controller.openLog,
                                       ),
                                       const Divider(height: 1, indent: 52),
+                                      _ActionRow(
+                                        icon: FoxyIcons.info,
+                                        label: 'Licenses',
+                                        chevron: true,
+                                        onTap: () => _openLicenses(context),
+                                      ),
                                     ],
-                                    _ActionRow(
-                                      icon: FoxyIcons.doc,
-                                      label: 'Open log',
-                                      // Windows: Notepad. macOS: the text editor. Android: a page in the app.
-                                      onTap: Host.isAndroid ? () => _openLog(context) : controller.openLog,
-                                    ),
-                                    const Divider(height: 1, indent: 52),
-                                    _ActionRow(
-                                      icon: FoxyIcons.info,
-                                      label: 'Licenses',
-                                      chevron: true,
-                                      onTap: () => _openLicenses(context),
-                                    ),
-                                  ],
+                                  ),
                                 ),
-                              ),
-                              const Spacer(),
-                              const SizedBox(height: 24),
-                              _SignOutRow(enabled: idle, onTap: _signOut),
-                              const SizedBox(height: 16),
-                              Text(
-                                'Version $kAppVersion',
-                                textAlign: TextAlign.center,
-                                style: FoxyText.caption.copyWith(color: FoxyColors.textFaint),
-                              ),
-                            ],
+                                // Sign out and Version sit at the bottom; the gap above is
+                                // whatever is left (at least 8) so the page fits where it can.
+                                const Spacer(),
+                                const SizedBox(height: 8),
+                                _SignOutRow(enabled: idle, onTap: _signOut),
+                                const SizedBox(height: 16),
+                                Text(
+                                  'Version $kAppVersion',
+                                  textAlign: TextAlign.center,
+                                  style: FoxyText.caption.copyWith(color: FoxyColors.textFaint),
+                                ),
+                              ],
+                            ),
                           ),
                         ),
                       ),
-                    ],
+                    ),
                   ),
                 ),
               ],
@@ -220,13 +227,75 @@ class _DataCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final left = remaining;
     final total = max;
-    if (left == null && total == null && resetsAt == null) return const SizedBox.shrink();
+    final reset = resetsAt == null ? null : formatResetDate(resetsAt!.toLocal());
+
+    // Nothing known yet (or the account check failed): the card keeps its place.
+    if (left == null && total == null && resetsAt == null) {
+      return AppCard(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text('Data left', style: FoxyText.title),
+            const SizedBox(height: 4),
+            Text('Not known yet', style: FoxyText.caption.copyWith(color: FoxyColors.textFaint)),
+          ],
+        ),
+      );
+    }
 
     final usedUp = left != null && left <= 0;
-    final String? headline;
     if (usedUp) {
-      headline = total != null ? 'No data left of ${formatBytes(total)}' : 'No data left';
-    } else if (left != null && total != null) {
+      return AppCard(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Container(
+                  width: 40,
+                  height: 40,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(shape: BoxShape.circle, color: FoxyColors.danger.withValues(alpha: 0.14)),
+                  child: const FoxyIcon(FoxyIcons.alert, size: 20, color: FoxyColors.danger),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text('No data left', style: FoxyText.title.copyWith(color: FoxyColors.danger)),
+                      const SizedBox(height: 2),
+                      Text(
+                        total != null
+                            ? 'You\'ve used all ${formatBytes(total)} this month.'
+                            : 'You\'ve used this month\'s free data.',
+                        style: FoxyText.caption,
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            const _DataBar(fraction: 0, usedUp: true),
+            const SizedBox(height: 12),
+            Text(
+              reset != null
+                  ? 'Resets $reset — FoxyVPN works again then.'
+                  : 'Mozilla resets it at the start of each month.',
+              style: FoxyText.caption,
+            ),
+          ],
+        ),
+      );
+    }
+
+    final String? headline;
+    if (left != null && total != null) {
       headline = '${formatBytes(left)} left of ${formatBytes(total)}';
     } else if (left != null) {
       headline = '${formatBytes(left)} left';
@@ -247,15 +316,12 @@ class _DataCard extends StatelessWidget {
               headline,
               maxLines: 2,
               overflow: TextOverflow.ellipsis,
-              style: FoxyText.title.copyWith(
-                color: usedUp ? FoxyColors.danger : FoxyColors.text,
-                fontFeatures: const [FontFeature.tabularFigures()],
-              ),
+              style: FoxyText.title.copyWith(fontFeatures: const [FontFeature.tabularFigures()]),
             ),
-          if (fraction != null) ...[const SizedBox(height: 12), _DataBar(fraction: fraction, usedUp: usedUp)],
-          if (resetsAt != null) ...[
+          if (fraction != null) ...[const SizedBox(height: 12), _DataBar(fraction: fraction, usedUp: false)],
+          if (reset != null) ...[
             SizedBox(height: headline == null ? 0 : 12),
-            Text('Resets ${formatResetDate(resetsAt!.toLocal())}', style: FoxyText.caption),
+            Text('Resets $reset', style: FoxyText.caption),
           ],
         ],
       ),

@@ -16,6 +16,7 @@ import 'account.dart';
 import 'app_log.dart';
 import 'errors.dart';
 import 'fxa.dart' show LoginDone, LoginNeedsCode, LoginStep;
+import 'guardian.dart' show QuotaExceeded;
 import 'http_util.dart' show ControlPlane;
 import 'platform/android_bridge.dart';
 import 'platform/host.dart';
@@ -32,23 +33,21 @@ import 'tunnel/windows_tun.dart';
 enum ConnState { preparing, idle, connecting, connected, reconnecting, disconnecting }
 
 /// How the controller starts the proxy session and the tunnel; replaced in tests.
-typedef SessionStarter =
-    Future<VpnSession> Function({
-      required Account account,
-      required Location location,
-      void Function(String message)? log,
-      Future<void> Function()? beforeReconnect,
-      bool directFallback,
-    });
+typedef SessionStarter = Future<VpnSession> Function({
+  required Account account,
+  required Location location,
+  void Function(String message)? log,
+  Future<void> Function()? beforeReconnect,
+  bool directFallback,
+});
 
 /// The Windows tunnel starter (kept as it was; see [VpnController.startTun]).
-typedef TunStarter =
-    Future<WindowsTun> Function({
-      required int socksPort,
-      required InternetAddress bypass,
-      List<InternetAddress> extraBypass,
-      void Function(String)? log,
-    });
+typedef TunStarter = Future<WindowsTun> Function({
+  required int socksPort,
+  required InternetAddress bypass,
+  List<InternetAddress> extraBypass,
+  void Function(String)? log,
+});
 
 /// How long a disconnect waits for a connect that is still reaching Mozilla's
 /// server (no routes exist yet, so giving up on it is safe). Once the tunnel is
@@ -86,17 +85,17 @@ class VpnController extends ChangeNotifier {
     this.locationsMaxAge = const Duration(minutes: 2),
     this.statsInterval = const Duration(seconds: 1),
     DateTime Function()? clock,
-  })  : _clock = clock ?? DateTime.now,
-        _account = account ?? Account(),
-        _settings = settings ?? SettingsStore(),
-        _cleanup = cleanup ?? _defaultCleanup,
-        _loadLocations = loadLocations ?? fetchLocations,
-        _ping = ping ?? pingMs,
-        _detectConflicts = detectConflicts ?? ConflictDetector.detect,
-        _startSession = startSession ?? VpnSession.start,
-        _startTun = startBackend ?? _wrapWindows(startTun) ?? startPlatformTun,
-        _prepareTun = prepareTun ?? (startBackend != null || startTun != null ? null : platformPrepare),
-        _android = androidBridge ?? (Host.isAndroid ? AndroidBridge.instance : null) {
+  }) : _clock = clock ?? DateTime.now,
+       _account = account ?? Account(),
+       _settings = settings ?? SettingsStore(),
+       _cleanup = cleanup ?? _defaultCleanup,
+       _loadLocations = loadLocations ?? fetchLocations,
+       _ping = ping ?? pingMs,
+       _detectConflicts = detectConflicts ?? ConflictDetector.detect,
+       _startSession = startSession ?? VpnSession.start,
+       _startTun = startBackend ?? _wrapWindows(startTun) ?? startPlatformTun,
+       _prepareTun = prepareTun ?? (startBackend != null || startTun != null ? null : platformPrepare),
+       _android = androidBridge ?? (Host.isAndroid ? AndroidBridge.instance : null) {
     _signedIn = _account.hasSavedSignIn;
     _selectedKey = _settings.selectedLocation;
   }
@@ -109,9 +108,8 @@ class VpnController extends ChangeNotifier {
       List<InternetAddress> extraBypass = const [],
       String? label,
       void Function(String)? log,
-    }) async => WindowsTunBackend(
-      await start(socksPort: socksPort, bypass: bypass, extraBypass: extraBypass, log: log),
-    );
+    }) async =>
+        WindowsTunBackend(await start(socksPort: socksPort, bypass: bypass, extraBypass: extraBypass, log: log));
   }
 
   /// Undoes routes and DNS rules left behind by an earlier crash (does nothing
@@ -214,12 +212,14 @@ class VpnController extends ChangeNotifier {
   Future<void> init() => _initFuture ??= _init();
 
   Future<void> _init() async {
-    final cleanup = _cleanup().catchError((Object e) {
-      AppLog.write('Startup cleanup failed: $e');
-    }).whenComplete(() {
-      _cleaning = false;
-      _notify();
-    });
+    final cleanup = _cleanup()
+        .catchError((Object e) {
+          AppLog.write('Startup cleanup failed: $e');
+        })
+        .whenComplete(() {
+          _cleaning = false;
+          _notify();
+        });
     _listenToAndroid();
     _syncTile();
     await Future.wait([cleanup, _load(), _checkAccount(), refreshConflicts()]);
@@ -471,12 +471,26 @@ class VpnController extends ChangeNotifier {
       _passQuotaMax = pass.quotaMax;
       _passQuotaResetsAt = pass.quotaResetsAt;
       _accountError = null;
+    } on QuotaExceeded catch (e) {
+      // Not an account problem: the sign-in works, the month's data is gone.
+      if (!_signedIn) return;
+      AppLog.write('Account check: the free data is used up');
+      _markQuotaUsedUp(e);
+      _accountError = null;
     } catch (e) {
       AppLog.write('Account check failed: $e');
       _accountError = friendlyError(e);
       _syncSignIn();
     }
     _notify();
+  }
+
+  /// Mozilla said 429: nothing is left, whatever was known before. A known
+  /// allowance and reset date are kept (or taken from the response).
+  void _markQuotaUsedUp(QuotaExceeded e) {
+    _passQuotaRemaining = 0;
+    _passQuotaMax = e.quotaMax ?? _passQuotaMax;
+    _passQuotaResetsAt = e.quotaResetsAt ?? _passQuotaResetsAt;
   }
 
   int? get quotaRemaining => _session?.quotaRemaining ?? _passQuotaRemaining;
@@ -557,7 +571,6 @@ class VpnController extends ChangeNotifier {
   /// A round of pings is running (the Locations refresh icon spins).
   bool get pingingLocations => _pinging.isNotEmpty;
 
-
   /// null = no reply / not measured yet. Every location is pinged at its first
   /// server, Recommended included. While connected this stays the last value
   /// measured before connecting (refresh is off, and late replies are ignored).
@@ -570,8 +583,7 @@ class VpnController extends ChangeNotifier {
     return _pings[l];
   }
 
-  bool isPinging(Location l) =>
-      l.isRecommended ? fastestLocation == null && _pinging.isNotEmpty : _pinging.contains(l);
+  bool isPinging(Location l) => l.isRecommended ? fastestLocation == null && _pinging.isNotEmpty : _pinging.contains(l);
 
   /// The real location with the lowest ping; null until one has answered.
   /// Recommended connects here (it only falls back to Mozilla's own pick when
@@ -641,19 +653,21 @@ class VpnController extends ChangeNotifier {
     _pinging.addAll(batch);
     _sortedCache = null; // the order now holds still until the round is done
     _notify();
-    await Future.wait(batch.map((location) async {
-      int? ms;
-      try {
-        ms = await _ping(location.servers.first);
-      } catch (_) {}
-      if (_disposed || generation != _generation) return;
-      // A ping that finishes after the tunnel came up went through the tunnel and
-      // means nothing: keep the value measured before connecting (if any).
-      final throughTunnel = _session != null || _tunStarting;
-      if (!throughTunnel) _pings[location] = ms;
-      _pinging.remove(location);
-      _notifySoon();
-    }));
+    await Future.wait(
+      batch.map((location) async {
+        int? ms;
+        try {
+          ms = await _ping(location.servers.first);
+        } catch (_) {}
+        if (_disposed || generation != _generation) return;
+        // A ping that finishes after the tunnel came up went through the tunnel and
+        // means nothing: keep the value measured before connecting (if any).
+        final throughTunnel = _session != null || _tunStarting;
+        if (!throughTunnel) _pings[location] = ms;
+        _pinging.remove(location);
+        _notifySoon();
+      }),
+    );
     if (_disposed || generation != _generation) return;
     _sortedCache = null; // every reply is in: one reorder
     _notify();
@@ -1023,6 +1037,7 @@ class VpnController extends ChangeNotifier {
       ControlPlane.sourceAddress = tun.physicalAddress;
     } catch (e) {
       AppLog.write('Connect failed: $e');
+      if (e is QuotaExceeded && _signedIn) _markQuotaUsedUp(e);
       await _stopQuietly(tun, session);
       ControlPlane.reset();
       _syncSignIn();
@@ -1048,12 +1063,14 @@ class VpnController extends ChangeNotifier {
         _notify();
       }
     });
-    unawaited(tun.exited.then((_) {
-      // Only an error if we did not ask for it (_tun is cleared by _disconnect).
-      if (_tun == tun) {
-        _disconnect(error: tun!.exitMessage);
-      }
-    }));
+    unawaited(
+      tun.exited.then((_) {
+        // Only an error if we did not ask for it (_tun is cleared by _disconnect).
+        if (_tun == tun) {
+          _disconnect(error: tun!.exitMessage);
+        }
+      }),
+    );
     _speed.reset();
     _speed.sample(session.bytesUp, session.bytesDown, _clock()); // baseline
     if (_onScreen.value) _statsTimer = Timer.periodic(statsInterval, (_) => _onStatsTick());

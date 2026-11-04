@@ -17,7 +17,13 @@ class GuardianError implements Exception {
 }
 
 class QuotaExceeded extends GuardianError {
-  QuotaExceeded() : super('This month\'s free VPN data is used up. It resets next month.', statusCode: 429);
+  QuotaExceeded({this.quotaMax, this.quotaResetsAt})
+    : super('This month\'s free VPN data is used up. It resets next month.', statusCode: 429);
+
+  /// The monthly allowance and its reset time, when the 429 response carried them
+  /// (`x-quota-limit`, `x-quota-reset`).
+  final int? quotaMax;
+  final DateTime? quotaResetsAt;
 }
 
 class TokenRejected extends GuardianError {
@@ -76,20 +82,25 @@ class GuardianClient {
   }
 
   Future<JsonResponse> _request(String method, String path, String accessToken) async {
-    final response = await sendJson(method, Uri.parse('$_guardianEndpoint$path'),
-        body: method == 'POST' ? const [] : null,
-        headers: {'authorization': 'Bearer $accessToken'});
+    final response = await sendJson(
+      method,
+      Uri.parse('$_guardianEndpoint$path'),
+      body: method == 'POST' ? const [] : null,
+      headers: {'authorization': 'Bearer $accessToken'},
+    );
     switch (response.statusCode) {
       case 200:
         return response;
       case 401 || 403:
         throw TokenRejected(response.statusCode);
       case 429:
-        throw QuotaExceeded();
+        throw QuotaExceeded(
+          quotaMax: int.tryParse(response.headers.value('x-quota-limit') ?? ''),
+          quotaResetsAt: parseQuotaReset(response.headers.value('x-quota-reset')),
+        );
       default:
         final snippet = response.body.length > 300 ? response.body.substring(0, 300) : response.body;
-        throw GuardianError('Mozilla VPN error: HTTP ${response.statusCode} $snippet',
-            statusCode: response.statusCode);
+        throw GuardianError('Mozilla VPN error: HTTP ${response.statusCode} $snippet', statusCode: response.statusCode);
     }
   }
 }
