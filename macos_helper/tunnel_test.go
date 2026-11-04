@@ -37,6 +37,7 @@ type fakePlatform struct {
 	childDead bool
 	child     *fakeChild
 	stale     []int
+	failSet   map[string]bool // services whose -setdnsservers fails
 }
 
 func newFake() *fakePlatform {
@@ -100,6 +101,9 @@ func (f *fakePlatform) run(ctx context.Context, name string, args ...string) (st
 			}
 			return strings.Join(s, "\n") + "\n", nil
 		case "-setdnsservers":
+			if f.failSet[args[1]] {
+				return "networksetup failed\n", errors.New("exit 1")
+			}
 			if args[2] == "empty" {
 				f.dns[args[1]] = nil
 			} else {
@@ -453,5 +457,89 @@ func TestRefreshMovesBypass(t *testing.T) {
 	}
 	if _, err := m.Refresh(&client{}); err == nil {
 		t.Error("refresh from a non-owner must fail")
+	}
+}
+
+func TestShutdownRefusesLaterStart(t *testing.T) {
+	f := newFake()
+	m, _ := newTestManager(t, f)
+	o := &client{}
+	if _, err := m.Start(o, 51234, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	m.Shutdown()
+	if len(f.dns["Wi-Fi"]) != 0 {
+		t.Errorf("DNS not restored: %v", f.dns)
+	}
+	before := f.callsString()
+	if _, err := m.Start(o, 51234, nil, nil); err == nil || !strings.Contains(err.Error(), "restarting") {
+		t.Errorf("start after shutdown: %v", err)
+	}
+	if _, err := m.Refresh(o); err == nil || !strings.Contains(err.Error(), "restarting") {
+		t.Errorf("refresh after shutdown: %v", err)
+	}
+	if f.callsString() != before {
+		t.Error("a refused start must not touch the system")
+	}
+}
+
+func TestSetDNSPartialFailureFailsStart(t *testing.T) {
+	f := newFake()
+	f.failSet = map[string]bool{"USB LAN": true}
+	m, p := newTestManager(t, f)
+	_, err := m.Start(&client{}, 51234, nil, nil)
+	if err == nil || err.Error() != "The Mac's DNS settings could not be changed." {
+		t.Fatalf("err: %v", err)
+	}
+	if len(f.dns["Wi-Fi"]) != 0 || fileExists(p.State) {
+		t.Errorf("not torn down: %v", f.dns)
+	}
+}
+
+func TestRestoreFailureSweeps(t *testing.T) {
+	f := newFake()
+	m, _ := newTestManager(t, f)
+	o := &client{}
+	if _, err := m.Start(o, 51234, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	// Restoring Wi-Fi fails: the sweep must then run (it lists the services again).
+	f.failSet = map[string]bool{"Wi-Fi": true}
+	m.Stop(o)
+	if n := strings.Count(f.callsString(), "-listallnetworkservices"); n < 2 {
+		t.Errorf("expected a sweep after a failed restore, services listed %d times", n)
+	}
+}
+
+func TestRefreshCoversNewAdapter(t *testing.T) {
+	f := newFake()
+	m, p := newTestManager(t, f)
+	o := &client{}
+	if _, err := m.Start(o, 51234, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	f.services += "Thunderbolt Ethernet\n"
+	f.dns["Thunderbolt Ethernet"] = []string{"9.9.9.9"}
+	f.mu.Unlock()
+	if _, err := m.Refresh(o); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(f.dns["Thunderbolt Ethernet"], ","); got != dnsServer {
+		t.Errorf("new adapter DNS: %q", got)
+	}
+	st, _ := readState(p.State)
+	var saved bool
+	for _, d := range st.DNS {
+		if d.Service == "Thunderbolt Ethernet" && strings.Join(d.Servers, ",") == "9.9.9.9" {
+			saved = true
+		}
+	}
+	if !saved {
+		t.Errorf("original not saved: %+v", st.DNS)
+	}
+	m.Stop(o)
+	if got := strings.Join(f.dns["Thunderbolt Ethernet"], ","); got != "9.9.9.9" {
+		t.Errorf("new adapter not restored: %q", got)
 	}
 }

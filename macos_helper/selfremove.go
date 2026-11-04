@@ -36,7 +36,7 @@ func checkSelfRemove(paths Paths, mgr *Manager, log *Logger) bool {
 		return false
 	}
 	log.Printf("the app %q is gone: removing the helper", cfg.AppPath)
-	mgr.StopAll()
+	mgr.Shutdown()
 	for _, p := range []string{paths.Tun2socks, paths.Config, paths.State, paths.Log + ".1",
 		paths.Plist, paths.Socket, paths.Binary} {
 		_ = os.Remove(p)

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -48,41 +49,49 @@ func (m *Manager) setDNS(ctx context.Context, s *session) error {
 	if err != nil || len(svcs) == 0 {
 		return errors.New("The network services of this Mac could not be read, so DNS could not be set up.")
 	}
-	ok := 0
+	failed := false
 	for _, svc := range svcs {
-		old, err := m.getDNS(ctx, svc)
-		if err != nil {
-			m.log.Printf("could not read DNS of %q (skipped): %v", svc, err)
-			continue
+		if err := m.applyDNS(ctx, s, svc); err != nil {
+			m.log.Printf("%v", err)
+			failed = true
 		}
-		if len(old) == 1 && old[0] == dnsServer {
-			old = nil // left over from a crash without state: never "restore" to ourselves
-		}
-		s.st.DNS = append(s.st.DNS, DNSRec{Service: svc, Servers: old})
-		m.save(s)
-		if err := m.putDNS(ctx, svc, []string{dnsServer}); err != nil {
-			m.log.Printf("could not set DNS of %q: %v", svc, err)
-			continue
-		}
-		ok++
 	}
-	if ok == 0 {
-		return errors.New("DNS could not be set up on any network service.")
+	if failed || ctx.Err() != nil {
+		// A partly changed DNS would leak: fail, and the caller tears everything down.
+		return errors.New("The Mac's DNS settings could not be changed.")
 	}
 	m.flushDNS(ctx)
 	return nil
 }
 
+// applyDNS saves one service's DNS servers in the session state, then points it at the tunnel.
+func (m *Manager) applyDNS(ctx context.Context, s *session, svc string) error {
+	old, err := m.getDNS(ctx, svc)
+	if err != nil {
+		return fmt.Errorf("could not read DNS of %q: %v", svc, err)
+	}
+	if len(old) == 1 && old[0] == dnsServer {
+		old = nil // left over from a crash without state: never "restore" to ourselves
+	}
+	s.st.DNS = append(s.st.DNS, DNSRec{Service: svc, Servers: old})
+	m.save(s)
+	if err := m.putDNS(ctx, svc, []string{dnsServer}); err != nil {
+		return fmt.Errorf("could not set DNS of %q: %v", svc, err)
+	}
+	return nil
+}
+
 // restoreDNS puts the saved servers back, with a few retries: stuck DNS means no internet.
-func (m *Manager) restoreDNS(ctx context.Context, d DNSRec) {
+func (m *Manager) restoreDNS(ctx context.Context, d DNSRec) bool {
 	for i := 0; i < 3; i++ {
 		err := m.putDNS(ctx, d.Service, d.Servers)
 		if err == nil {
-			return
+			return true
 		}
 		m.log.Printf("restoring DNS of %q failed (try %d): %v", d.Service, i+1, err)
 		time.Sleep(500 * time.Millisecond)
 	}
+	return false
 }
 
 // sweepDNS is the last safety net: any service still pointing only at 198.18.0.2 (for example

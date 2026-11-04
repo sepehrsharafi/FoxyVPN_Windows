@@ -67,6 +67,8 @@ class MacHelperClient {
       onDone: () => _fail('The network helper closed the connection.'),
       cancelOnError: true,
     );
+    // A write to a dead socket also fails `done`; the listener above reports the close.
+    unawaited(_socket.done.then((_) {}, onError: (Object _) {}));
   }
 
   /// Connects to the helper's socket. Throws a [MacHelperError] if there is

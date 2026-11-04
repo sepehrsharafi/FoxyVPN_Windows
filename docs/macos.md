@@ -113,6 +113,8 @@ power, it undoes what is left the next time it starts, which is at boot.
 - Problems? Press the document icon in the app to open the log
   (`~/Library/Application Support/FoxyVPN/log.txt`). The helper's log is
   `/Library/Application Support/FoxyVPN/helper.log`.
+- The helper only takes commands from the FoxyVPN app installed in Applications, so keep FoxyVPN in
+  `/Applications` (not in a folder that other programs can write to).
 - macOS lists the helper under **System Settings > General > Login Items & Extensions** (macOS 13 or
   newer). Leave it on: that is how it starts at boot to put your DNS back after a power cut.
 - Other VPNs and proxy apps: FoxyVPN warns when it finds proxy environment variables

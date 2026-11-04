@@ -98,7 +98,7 @@ func runDaemon(paths Paths) int {
 	case code = <-exit:
 	}
 	_ = l.Close()
-	mgr.StopAll()
+	mgr.Shutdown()
 	_ = os.Remove(paths.Socket)
 	return code
 }

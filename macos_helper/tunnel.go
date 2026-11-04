@@ -36,6 +36,7 @@ const (
 var (
 	privateRanges = []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10"}
 	errAnotherWin = errors.New("Another FoxyVPN window is already connected.")
+	errRestarting = errors.New("FoxyVPN's network helper is restarting. Try again.")
 )
 
 // platform is everything the manager needs from the operating system (faked in tests).
@@ -118,6 +119,8 @@ type Manager struct {
 	pf    platform
 	log   *Logger
 	cur   *session
+	// stopping is set once the helper is on its way out: no new tunnel may start.
+	stopping bool
 }
 
 func newManager(paths Paths, pf platform, log *Logger) *Manager {
@@ -161,6 +164,9 @@ func (m *Manager) defaultRoute(ctx context.Context) (routeInfo, error) {
 func (m *Manager) Start(owner any, port int, bypass []string, onExit func(string)) (*StartInfo, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.stopping {
+		return nil, errRestarting
+	}
 	if m.cur != nil {
 		if m.cur.owner != owner {
 			return nil, errAnotherWin
@@ -361,6 +367,9 @@ func lastLine(out string, err error) string {
 func (m *Manager) Refresh(owner any) (*StartInfo, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.stopping {
+		return nil, errRestarting
+	}
 	s := m.cur
 	if s == nil || s.owner != owner {
 		return nil, errors.New("Not connected.")
@@ -392,6 +401,26 @@ func (m *Manager) Refresh(owner any) (*StartInfo, error) {
 			if !have[p] {
 				_ = m.addRoute(ctx, s, "inet", p, "private", s.via(), false)
 			}
+		}
+	}
+	// A network adapter plugged in during the session gets the tunnel's DNS too.
+	if svcs, err := m.services(ctx); err == nil {
+		known := map[string]bool{}
+		for _, d := range s.st.DNS {
+			known[d.Service] = true
+		}
+		added := false
+		for _, svc := range svcs {
+			if known[svc] {
+				continue
+			}
+			if err := m.applyDNS(ctx, s, svc); err != nil {
+				m.log.Printf("%v", err)
+			}
+			added = true
+		}
+		if added {
+			m.flushDNS(ctx)
 		}
 	}
 	m.save(s)
@@ -441,6 +470,15 @@ func (m *Manager) StopAll() {
 	m.restoreStaleLocked()
 }
 
+// Shutdown is StopAll for a helper that is about to exit: it also refuses any later start.
+func (m *Manager) Shutdown() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.stopping = true
+	m.teardownLocked()
+	m.restoreStaleLocked()
+}
+
 func (m *Manager) teardownLocked() {
 	s := m.cur
 	if s == nil {
@@ -473,8 +511,11 @@ func (m *Manager) restoreStaleLocked() {
 // restore undoes DNS, routes and the tun2socks process, then deletes state.json.
 func (m *Manager) restore(st State, ch child) {
 	ctx := context.Background()
+	dnsFailed := false
 	for _, d := range st.DNS {
-		m.restoreDNS(ctx, d)
+		if !m.restoreDNS(ctx, d) {
+			dnsFailed = true
+		}
 	}
 	if len(st.DNS) > 0 {
 		m.flushDNS(ctx)
@@ -492,6 +533,9 @@ func (m *Manager) restore(st State, ch child) {
 		}
 	}
 	_ = os.Remove(m.paths.State)
+	if dnsFailed {
+		m.sweepDNS() // whatever is still at the tunnel's resolver goes back to automatic
+	}
 }
 
 // watch ends the session when tun2socks dies or the interface disappears.

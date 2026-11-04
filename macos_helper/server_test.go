@@ -3,9 +3,11 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -75,6 +77,7 @@ func TestServerRejectsStrangers(t *testing.T) {
 		t.Errorf("hello: %v", h)
 	}
 	for _, cmd := range []string{`{"id":2,"cmd":"start","socksPort":5000}`, `{"id":3,"cmd":"stop"}`, `{"id":4,"cmd":"cleanup"}`} {
+		c := dial() // a stranger is disconnected after its first answer
 		r := c.send(t, cmd)
 		if r["ok"] != false || r["error"] != "Not allowed." {
 			t.Errorf("%s -> %v", cmd, r)
@@ -166,5 +169,39 @@ func TestServerLineTooLong(t *testing.T) {
 	r := c.read(t)
 	if r["ok"] != false {
 		t.Errorf("long line: %v", r)
+	}
+}
+
+func TestStrangerIsClosedAfterFirstAnswer(t *testing.T) {
+	_, dial := startTestServer(t, "/usr/bin/curl", newFake())
+	c := dial()
+	if h := c.send(t, `{"id":1,"cmd":"hello"}`); h["ok"] != true {
+		t.Fatalf("hello: %v", h)
+	}
+	_ = c.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := c.r.ReadBytes('\n'); err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Errorf("connection should be closed by the helper, got %v", err)
+	}
+}
+
+func TestStrangerIdleTimesOut(t *testing.T) {
+	srv, dial := startTestServer(t, "/usr/bin/curl", newFake())
+	srv.strangerTimeout = 100 * time.Millisecond
+	c := dial()
+	_ = c.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := c.r.ReadBytes('\n'); err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Errorf("idle stranger should be dropped by the helper, got %v", err)
+	}
+}
+
+func TestAllowedPeerStaysOpenWithoutTimeout(t *testing.T) {
+	srv, dial := startTestServer(t, "/Applications/FoxyVPN.app/Contents/MacOS/FoxyVPN", newFake())
+	srv.strangerTimeout = 50 * time.Millisecond
+	c := dial()
+	time.Sleep(200 * time.Millisecond)
+	for id := 1; id <= 2; id++ {
+		if h := c.send(t, `{"id":`+strconv.Itoa(id)+`,"cmd":"hello"}`); h["ok"] != true {
+			t.Errorf("hello %d: %v", id, h)
+		}
 	}
 }

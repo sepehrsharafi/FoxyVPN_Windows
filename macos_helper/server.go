@@ -25,10 +25,12 @@ type Server struct {
 	log     *Logger
 	peerExe func(net.Conn) (string, error)
 	slots   chan struct{}
+	// strangerTimeout limits how long a connection that is not the app may sit idle.
+	strangerTimeout time.Duration
 }
 
 func newServer(paths Paths, mgr *Manager, log *Logger, peerExe func(net.Conn) (string, error)) *Server {
-	return &Server{paths: paths, mgr: mgr, log: log, peerExe: peerExe, slots: make(chan struct{}, maxClients)}
+	return &Server{paths: paths, mgr: mgr, log: log, peerExe: peerExe, slots: make(chan struct{}, maxClients), strangerTimeout: 15 * time.Second}
 }
 
 type client struct {
@@ -107,6 +109,9 @@ func (s *Server) handleConn(conn net.Conn) {
 	c.allowed = s.isAllowed(conn)
 	r := bufio.NewReaderSize(conn, 4096)
 	for {
+		if !c.allowed {
+			_ = conn.SetReadDeadline(time.Now().Add(s.strangerTimeout))
+		}
 		line, err := readLine(r, maxLine)
 		if err != nil {
 			if errors.Is(err, errLineTooLong) {
@@ -120,9 +125,15 @@ func (s *Server) handleConn(conn net.Conn) {
 		var req request
 		if err := json.Unmarshal(line, &req); err != nil {
 			c.reply(map[string]any{"id": 0, "ok": false, "error": "Malformed request."})
+			if !c.allowed {
+				return
+			}
 			continue
 		}
 		c.reply(s.dispatch(c, &req))
+		if !c.allowed {
+			return // a stranger gets one answer (hello included), so it cannot hold a slot
+		}
 	}
 }
 

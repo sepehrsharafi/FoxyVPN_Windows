@@ -84,6 +84,17 @@ void main() {
       await client.close();
     });
 
+    test("a write to a dead socket does not raise an unhandled error", () async {
+      final errors = <Object>[];
+      await runZonedGuarded(() async {
+        final c = MacHelperClient(_DeadSocket());
+        await expectLater(c.request('hello', const {}, const Duration(milliseconds: 50)), throwsA(isA<MacHelperError>()));
+        await pumpEventQueue();
+        c.close();
+      }, (e, _) => errors.add(e));
+      expect(errors, isEmpty);
+    });
+
     test('default timeouts are 30 s for start and 10 s for the rest', () {
       // (Checked by construction; waiting that long in a test would be silly.)
       final c = MacHelperClient(_NullSocket());
@@ -299,6 +310,25 @@ void main() {
   });
 }
 
+/// A socket whose write fails `done` (like a write to a dead socket).
+class _DeadSocket extends _NullSocket {
+  final _done = Completer<void>();
+
+  @override
+  StreamSubscription<Uint8List> listen(
+    void Function(Uint8List event)? onData, {
+    Function? onError,
+    void Function()? onDone,
+    bool? cancelOnError,
+  }) => StreamController<Uint8List>().stream.listen(onData, onError: onError, onDone: onDone);
+
+  @override
+  Future<void> get done => _done.future;
+
+  @override
+  void add(List<int> data) => _done.completeError(const SocketException('Broken pipe'));
+}
+
 /// Only for checking constructor defaults.
 class _NullSocket extends Stream<Uint8List> implements Socket {
   @override
@@ -308,6 +338,9 @@ class _NullSocket extends Stream<Uint8List> implements Socket {
     void Function()? onDone,
     bool? cancelOnError,
   }) => const Stream<Uint8List>.empty().listen(onData, onError: onError, onDone: onDone);
+
+  @override
+  Future<void> get done => Future<void>.value();
 
   @override
   void destroy() {}
