@@ -164,7 +164,12 @@ OUT="$("$CLIENT" probe "$SOCKET" 2>&1)"
 case "$OUT" in *'"ok":true'*) pass "a client inside the app bundle is accepted" ;; *) fail "the in-bundle client was refused: $OUT" ;; esac
 
 # ---------------------------------------------------------------- fake SOCKS5 server
-"$WORK/fakesocks" -iface "$PHYS_IFACE" -log "$WORK/socks.log" -portfile "$WORK/socks.port" >"$WORK/socks.out" 2>&1 &
+# DNS goes to the resolver the Mac uses right now (CI VMs may block public
+# resolvers such as 1.1.1.1); read before the tunnel changes it.
+REAL_DNS="$(resolver1)"
+case "$REAL_DNS" in ''|198.18.0.2|*:*) REAL_DNS=1.1.1.1 ;; esac
+echo "real resolver: $REAL_DNS"
+"$WORK/fakesocks" -iface "$PHYS_IFACE" -resolver "$REAL_DNS:53" -log "$WORK/socks.log" -portfile "$WORK/socks.port" >"$WORK/socks.out" 2>&1 &
 SOCKS_PID=$!
 wait_for 10 "fake socks port file" test -s "$WORK/socks.port" || fail "fake SOCKS server did not start: $(/bin/cat "$WORK/socks.out" 2>/dev/null)"
 SOCKS_PORT="$(/bin/cat "$WORK/socks.port")"
