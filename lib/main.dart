@@ -22,6 +22,7 @@ const shutdownCap = Duration(seconds: 60);
 Future<void> main(List<String> args) async {
   // Run by the installer / uninstaller: undo what the app leaves on the PC and
   // exit. Before any UI or window setup (and before anything else is touched).
+  // (Windows only: the macOS helper restores its own state.)
   if (Platform.isWindows && args.contains('--cleanup')) {
     exit(await runWindowsCleanup(removeUserData: args.contains('--remove-data')));
   }
@@ -32,7 +33,7 @@ Future<void> main(List<String> args) async {
     await _mainAndroid();
     return;
   }
-  await _mainWindows();
+  await _mainDesktop();
 }
 
 /// Android: no window management at all. The tunnel runs in this engine, which
@@ -47,7 +48,8 @@ Future<void> _mainAndroid() async {
   runApp(FoxyApp(controller: controller));
 }
 
-Future<void> _mainWindows() async {
+/// Windows and macOS: one fixed-size window with our own title bar.
+Future<void> _mainDesktop() async {
   // The native window stays hidden until shown (the runner no longer shows it
   // on the first frame), so whatever fails below, show() is still attempted.
   // windows/runner/flutter_window.cpp also shows it after 3 s as a last resort.
@@ -57,17 +59,19 @@ Future<void> _mainWindows() async {
   try {
     await windowManager.ensureInitialized();
     controller = VpnController();
-    // Close: hide to the tray or quit (disconnect first), see windows_tray.dart.
+    // Close: hide to the tray / menu bar or quit (disconnect first), see windows_tray.dart.
     shell = WindowsShell(controller, shutdownCap: shutdownCap);
     windowManager.addListener(shell);
     await windowManager.setPreventClose(true);
     await windowManager.waitUntilReadyToShow(
-      const WindowOptions(
+      WindowOptions(
         size: _windowSize,
         minimumSize: _windowSize,
         maximumSize: _windowSize,
         center: true,
         titleBarStyle: TitleBarStyle.hidden,
+        // macOS: hide the native traffic lights, the custom title bar has the buttons.
+        windowButtonVisibility: Platform.isMacOS ? false : null,
         backgroundColor: _windowBackground,
         title: 'FoxyVPN',
       ),
@@ -96,7 +100,7 @@ Future<void> _mainWindows() async {
   // the UI is already up (the controller reports "preparing" until cleanup is done).
   unawaited(app.init());
   runApp(FoxyApp(controller: app));
-  // The notification-area icon, once the window is up. Until then a close
+  // The notification-area / menu bar icon, once the window is up. Until then a close
   // (or Setup's quit request) quits for real.
   shell?.start();
 }

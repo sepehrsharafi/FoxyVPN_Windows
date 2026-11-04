@@ -19,6 +19,7 @@ import 'fxa.dart' show LoginDone, LoginNeedsCode, LoginStep;
 import 'http_util.dart' show ControlPlane;
 import 'platform/android_bridge.dart';
 import 'platform/host.dart';
+import 'platform/macos_helper.dart' show macCleanupStale;
 import 'platform/tun_backend.dart';
 import 'servers.dart';
 import 'settings_store.dart';
@@ -114,10 +115,14 @@ class VpnController extends ChangeNotifier {
   }
 
   /// Undoes routes and DNS rules left behind by an earlier crash (does nothing
-  /// normally). Connect stays disabled until it is done. (Android has none:
+  /// normally; on macOS the root helper does it). Connect stays disabled until it is done. (Android has none:
   /// there are no routes or DNS rules of ours outside the VPN service.)
-  static Future<void> _defaultCleanup() =>
-      Host.isWindows ? WindowsTun.cleanupStale(log: AppLog.write) : Future<void>.value();
+  static Future<void> _defaultCleanup() => Host.isWindows
+      ? WindowsTun.cleanupStale(log: AppLog.write)
+      // The helper restores DNS and routes of a crashed run; only if it is there, never prompts.
+      : Host.isMacOS
+      ? macCleanupStale(log: AppLog.write)
+      : Future<void>.value();
 
   final Account _account;
   final SettingsStore _settings;
@@ -977,7 +982,8 @@ class VpnController extends ChangeNotifier {
     TunBackend? tun;
     try {
       // Android: the VPN permission dialog comes first, before any session or
-      // quota is used (nothing to do on Windows).
+      // quota is used. macOS: the network helper is installed here (the Mac
+      // password, once). Nothing to do on Windows.
       final prepare = _prepareTun;
       if (prepare != null) {
         await prepare();

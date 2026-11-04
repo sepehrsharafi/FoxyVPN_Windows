@@ -1,12 +1,12 @@
 name: Build
 
-# Every push to main builds and tests both apps. The Windows installer (and a
-# portable zip) and the Android APK are the run's artifacts: the download links
-# in the README.
+# Every push to main builds and tests all three apps. The Windows installer (and a
+# portable zip), the Android APK and the macOS disk image are the run's artifacts:
+# the download links in the README. (macos-port is the macOS work in progress.)
 
 on:
   push:
-    branches: [main]
+    branches: [main, macos-port]
   workflow_dispatch:
 
 env:
@@ -15,6 +15,8 @@ env:
   TUN2SOCKS_ZIP_SHA256: c5d46e9452f6c9cc7c15ab9158d6d6a0169ceecd6bca019ce476b49337d2be43
   TUN2SOCKS_LICENSE_SHA256: 796abbf6d0258a01321f88f72c1d712417acdd75342510f0796f7c567b6f05e5
   WINTUN_ZIP_SHA256: 07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51
+  TUN2SOCKS_DARWIN_ARM64_ZIP_SHA256: 7c5ebfe2ffb60ecf6e958cc5bbf3e06e74b8b33575ffbb4ba4f6f785a647f1ad
+  TUN2SOCKS_DARWIN_AMD64_ZIP_SHA256: 6e654da8bab9ca1645862f0e251a69980e0966680713011feea7b1e5901b2a95
   # Inno Setup, installed with Chocolatey only if the runner does not have ISCC.exe.
   INNO_SETUP_VERSION: 6.5.4
 
@@ -321,5 +323,182 @@ jobs:
         with:
           name: FoxyVPN-Android
           path: dist/FoxyVPN-Android.apk
+          if-no-files-found: error
+          retention-days: 90 # the longest GitHub keeps them (public repo); each push makes fresh ones
+
+  macos:
+    needs: analyze
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.47.4
+          channel: stable
+          cache: true
+
+      # The network helper (macos_helper/) is a Go program with no dependencies.
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.22'
+          cache: false
+
+      - run: flutter pub get
+
+      - name: Build the app
+        shell: bash
+        run: |
+          set -euo pipefail
+          flutter build macos --release
+          APP="$PWD/build/macos/Build/Products/Release/FoxyVPN.app"
+          if [ ! -x "$APP/Contents/MacOS/FoxyVPN" ]; then
+            echo "::error::FoxyVPN.app was not produced at $APP"
+            ls -la build/macos/Build/Products/Release || true
+            exit 1
+          fi
+          echo "APP=$APP" >> "$GITHUB_ENV"
+
+      # The helper and tun2socks (MIT, https://github.com/xjasonlyu/tun2socks) go inside the
+      # app, in Contents/Resources/helper. Both are universal (Apple Silicon and Intel).
+      - name: Add the network helper and tun2socks to the app
+        shell: bash
+        run: |
+          set -euo pipefail
+          dl="$RUNNER_TEMP/fxdl"
+          rm -rf "$dl"
+          mkdir -p "$dl/arm64" "$dl/amd64" "$dl/helper"
+
+          get_verified() { # url file sha256
+            curl -fsSL --retry 3 -o "$2" "$1"
+            actual="$(shasum -a 256 "$2" | awk '{print $1}')"
+            if [ "$actual" != "$3" ]; then
+              echo "::error::Checksum mismatch for $1: $actual"
+              exit 1
+            fi
+          }
+
+          base="https://github.com/xjasonlyu/tun2socks/releases/download/$TUN2SOCKS_VERSION"
+          get_verified "$base/tun2socks-darwin-arm64.zip" "$dl/arm64.zip" "$TUN2SOCKS_DARWIN_ARM64_ZIP_SHA256"
+          get_verified "$base/tun2socks-darwin-amd64.zip" "$dl/amd64.zip" "$TUN2SOCKS_DARWIN_AMD64_ZIP_SHA256"
+          get_verified "https://raw.githubusercontent.com/xjasonlyu/tun2socks/$TUN2SOCKS_VERSION/LICENSE" "$dl/LICENSE-tun2socks.txt" "$TUN2SOCKS_LICENSE_SHA256"
+          unzip -q "$dl/arm64.zip" -d "$dl/arm64"
+          unzip -q "$dl/amd64.zip" -d "$dl/amd64"
+          lipo -create "$dl/arm64/tun2socks-darwin-arm64" "$dl/amd64/tun2socks-darwin-amd64" -output "$dl/helper/tun2socks"
+          # lipo drops the signature, and Apple Silicon refuses to run unsigned code.
+          codesign --force --sign - "$dl/helper/tun2socks"
+
+          bash macos_helper/build.sh "$dl/built"
+          cp "$dl/built/foxyvpn-helper" "$dl/helper/foxyvpn-helper"
+          cp macos_helper/install.sh macos_helper/uninstall.sh macos_helper/com.foxyvpn.helper.plist "$dl/helper/"
+          cp "$dl/LICENSE-tun2socks.txt" "$dl/helper/LICENSE-tun2socks.txt"
+
+          dest="$APP/Contents/Resources/helper"
+          mkdir -p "$dest"
+          cp -X "$dl/helper/"* "$dest/"
+          chmod 755 "$dest/foxyvpn-helper" "$dest/tun2socks" "$dest/install.sh" "$dest/uninstall.sh"
+          chmod 644 "$dest/com.foxyvpn.helper.plist" "$dest/LICENSE-tun2socks.txt"
+          ls -la "$dest"
+
+      # Ad-hoc signature (no Apple developer account): the whole bundle gets one, so
+      # macOS sees an app that has not been changed since it was built.
+      - name: Sign the app ad hoc and check it
+        shell: bash
+        run: |
+          set -euo pipefail
+          xattr -cr "$APP"
+          codesign --force --deep --sign - "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+
+          need_universal() {
+            archs="$(lipo -archs "$1")"
+            echo "$1: $archs"
+            case " $archs " in *" arm64 "*) ;; *) echo "::error::$1 has no arm64 slice"; exit 1 ;; esac
+            case " $archs " in *" x86_64 "*) ;; *) echo "::error::$1 has no x86_64 slice"; exit 1 ;; esac
+          }
+          need_universal "$APP/Contents/MacOS/FoxyVPN"
+          need_universal "$APP/Contents/Resources/helper/foxyvpn-helper"
+          need_universal "$APP/Contents/Resources/helper/tun2socks"
+
+      # Start the app for a while: it must stay up (a crash at launch would show here).
+      - name: Launch test
+        shell: bash
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/foxyvpn-launch.log"
+          "$APP/Contents/MacOS/FoxyVPN" > "$log" 2>&1 &
+          pid=$!
+          sleep 15
+          alive=1
+          kill -0 "$pid" 2>/dev/null || alive=0
+          echo "--- stdout/stderr of the app ---"
+          tail -n 40 "$log" || true
+          appLog="$HOME/Library/Application Support/FoxyVPN/log.txt"
+          if [ -f "$appLog" ]; then
+            echo "--- $appLog ---"
+            tail -n 40 "$appLog" || true
+          fi
+          if [ "$alive" = 1 ]; then
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+          else
+            echo "::error::FoxyVPN exited within 15 seconds of starting"
+            exit 1
+          fi
+
+      # Installs the helper for real (root), runs a tunnel through a fake SOCKS5 server
+      # and checks traffic, DNS, teardown and uninstall. Needs Go (PATH is kept through sudo).
+      - name: Helper and tunnel test
+        shell: bash
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          sudo env "PATH=$PATH" bash macos_helper/ci/smoke.sh "$APP"
+
+      - name: Build the disk image
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="$RUNNER_TEMP/dmg-stage"
+          rm -rf "$stage"
+          mkdir -p "$stage" dist
+          # The smoke test put a test client into the bundle for a while: the
+          # shipped app must be exactly what was signed.
+          test ! -e "$APP/Contents/MacOS/foxyvpn-smoke-client"
+          codesign --verify --deep --strict "$APP"
+          ditto "$APP" "$stage/FoxyVPN.app"
+          ln -s /Applications "$stage/Applications"
+          cat > "$stage/Read me first.txt" <<'EOF'
+          FoxyVPN for macOS
+
+          1. Drag FoxyVPN into the Applications folder, then open it from there.
+
+          2. The first time, macOS may say it cannot verify FoxyVPN. That is because the
+             app is not notarised by Apple. To allow it once:
+             - macOS 15 or newer: try to open FoxyVPN, close the message, then open
+               System Settings > Privacy & Security, scroll down and click "Open Anyway"
+               next to FoxyVPN.
+             - macOS 14 or older: right-click FoxyVPN, choose Open, then Open again.
+             - Or in Terminal: xattr -dr com.apple.quarantine /Applications/FoxyVPN.app
+
+          3. The first time you connect, FoxyVPN asks for your Mac password once, to install
+             its small network helper. macOS may then show "Background item added": that is
+             the helper. Sign in with your Firefox account, pick a location and connect.
+
+          Uninstall: quit FoxyVPN (menu bar icon > Quit FoxyVPN) and drag it to the Trash.
+          The helper removes itself within a few hours. To remove it at once, run this in
+          Terminal before you delete the app:
+
+            sudo "/Applications/FoxyVPN.app/Contents/Resources/helper/uninstall.sh"
+          EOF
+          hdiutil create -volname FoxyVPN -srcfolder "$stage" -ov -format UDZO dist/FoxyVPN-macOS.dmg
+          hdiutil verify dist/FoxyVPN-macOS.dmg
+          ls -la dist
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: FoxyVPN-macOS
+          path: dist/FoxyVPN-macOS.dmg
           if-no-files-found: error
           retention-days: 90 # the longest GitHub keeps them (public repo); each push makes fresh ones

@@ -8,7 +8,8 @@ const _serverListUrl =
 
 /// The Mozilla VPN client's user agent for the platform we run on (the
 /// official clients send sys:windows / sys:android), for Firefox Accounts,
-/// Guardian and the server list, as NAT-on-steroids sends it.
+/// Guardian and the server list, as NAT-on-steroids sends it. macOS sends the
+/// Windows string on purpose (the server only has to see a known client).
 final mozillaVpnUserAgent = mozillaVpnUserAgentFor(android: Platform.isAndroid);
 
 String mozillaVpnUserAgentFor({required bool android}) =>

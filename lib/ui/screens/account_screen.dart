@@ -101,12 +101,14 @@ class _AccountScreenState extends State<AccountScreen> {
                                 padding: EdgeInsets.zero,
                                 child: Column(
                                   children: [
-                                    // Windows: closing the window hides FoxyVPN to the
-                                    // notification area (lib/platform/windows_tray.dart).
-                                    if (Host.isWindows) ...[
+                                    // Desktop: closing the window hides FoxyVPN to the
+                                    // notification area / menu bar (lib/platform/windows_tray.dart).
+                                    if (Host.isDesktop) ...[
                                       _SwitchRow(
                                         icon: FoxyIcons.minimize,
-                                        label: 'Run in the tray when closed',
+                                        label: Host.isMacOS
+                                            ? 'Keep running in the menu bar when closed'
+                                            : 'Run in the tray when closed',
                                         value: controller.keepInTray,
                                         onChanged: (v) => unawaited(controller.setKeepInTray(v)),
                                       ),
@@ -115,7 +117,7 @@ class _AccountScreenState extends State<AccountScreen> {
                                     _ActionRow(
                                       icon: FoxyIcons.doc,
                                       label: 'Open log',
-                                      // Windows: Notepad. Android: a page in the app.
+                                      // Windows: Notepad. macOS: the text editor. Android: a page in the app.
                                       onTap: Host.isAndroid ? () => _openLog(context) : controller.openLog,
                                     ),
                                     const Divider(height: 1, indent: 52),

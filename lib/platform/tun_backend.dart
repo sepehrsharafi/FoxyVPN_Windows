@@ -6,6 +6,8 @@
 // into that local SOCKS5 server:
 //
 //   Windows: WindowsTun = tun2socks + Wintun + routes (lib/tunnel/windows_tun.dart)
+//   macOS:   MacTun = a root helper daemon runs tun2socks, the app talks to it
+//            over a Unix socket (lib/tunnel/macos_tun.dart)
 //   Android: a Kotlin VpnService holds the TUN and runs hev-socks5-tunnel on it
 //            (lib/platform/android_tun.dart)
 //
@@ -13,9 +15,12 @@
 
 import 'dart:io';
 
+import '../app_log.dart';
+import '../tunnel/macos_tun.dart';
 import '../tunnel/windows_tun.dart';
 import 'android_tun.dart';
 import 'host.dart';
+import 'macos_helper.dart';
 
 abstract class TunBackend {
   /// Completes when the tunnel has ended (crashed, was taken away, or after [stop]).
@@ -96,6 +101,9 @@ Future<TunBackend> startPlatformTun({
   if (Host.isAndroid) {
     return AndroidTun.start(socksPort: socksPort, label: label, log: log);
   }
+  if (Host.isMacOS) {
+    return MacTunBackend.start(socksPort: socksPort, bypass: bypass, extraBypass: extraBypass, label: label, log: log);
+  }
   return WindowsTunBackend.start(
     socksPort: socksPort,
     bypass: bypass,
@@ -106,5 +114,10 @@ Future<TunBackend> startPlatformTun({
 }
 
 /// Anything the platform needs before a connection is started: on Android the
-/// VPN permission (the system dialog). Null where there is nothing to ask.
-Future<void> Function()? get platformPrepare => Host.isAndroid ? AndroidTun.prepare : null;
+/// VPN permission (the system dialog), on macOS the network helper (installed
+/// once, with the Mac password). Null where there is nothing to ask.
+Future<void> Function()? get platformPrepare => Host.isAndroid
+    ? AndroidTun.prepare
+    : Host.isMacOS
+    ? () => ensureHelper(log: AppLog.write)
+    : null;

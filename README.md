@@ -1,22 +1,27 @@
 # FoxyVPN
 
-A small VPN app for **Windows and Android** that sends your traffic through Mozilla's Firefox VPN
+A small VPN app for **Windows, macOS and Android** that sends your traffic through Mozilla's Firefox VPN
 servers, using the free monthly data allowance of **your own Firefox account**.
 
-Runs on **Windows** 10 / 11 (64-bit) and **Android** 8 or newer.
+Runs on **Windows** 10 / 11 (64-bit), **macOS** 12 or newer (Apple Silicon and Intel) and **Android** 8 or newer.
 
 ## Download and install
 
-GitHub builds both apps every time the code changes. To get them:
+GitHub builds the apps every time the code changes. To get them:
 
 1. Open the [latest successful build](https://github.com/sepehrsharafi/FoxyVPN_Windows/actions/workflows/build.yml?query=branch%3Amain+is%3Asuccess)
    and click the run at the top.
-2. Scroll down to **Artifacts** and download **FoxyVPN-Windows** or **FoxyVPN-Android**. You need to
+2. Scroll down to **Artifacts** and download **FoxyVPN-Windows**, **FoxyVPN-macOS** or **FoxyVPN-Android**. You need to
    be signed in to GitHub. Each download is a zip; unzip it.
 
 **Windows:** run `FoxyVPN-Setup.exe` and accept the administrator prompt. The installer isn't
 code-signed, so if Windows says "Windows protected your PC", click **More info**, then **Run anyway**.
 (There's also `FoxyVPN-Windows-portable.zip` if you'd rather not install anything.)
+
+**macOS:** open `FoxyVPN-macOS.dmg` and drag FoxyVPN onto Applications. The app isn't notarised by
+Apple, so the first time you open it, allow it once in **System Settings > Privacy & Security >
+Open Anyway**. The first time you connect, macOS asks for your password once, to install FoxyVPN's
+network helper. More in the [macOS guide](docs/macos.md).
 
 **Android:** open `FoxyVPN-Android.apk` on your phone (download it there, or copy it over) and allow
 installing apps from that source when Android asks. Google Play Protect may offer to scan it because
@@ -41,12 +46,13 @@ VPN client for Android. This project brings it to Windows and reworks the Androi
 - Everything goes through the tunnel, DNS included, so nothing leaks around the VPN.
 - Live upload and download speeds, the data left this month, and a session timer.
 - **Windows:** a normal installer, and a clean uninstall that puts your network back as it was.
+- **macOS:** a menu bar icon, and a clean uninstall that puts your network back as it was.
 - **Android:** a notification with live speeds and a Quick Settings tile that connects to the
   fastest location.
 
 Your sign-in is stored encrypted on your device and is only ever sent to Mozilla.
 
-More detail: [Windows guide](docs/windows.md) · [Android guide](docs/android.md)
+More detail: [Windows guide](docs/windows.md) · [macOS guide](docs/macos.md) · [Android guide](docs/android.md)
 
 ## Not commercial, not official
 
@@ -55,7 +61,8 @@ or endorsed by Mozilla**. It only uses the free allowance that comes with your o
 
 ## Building
 
-Built with [Flutter](https://flutter.dev). See [Windows](docs/windows.md#building-it-yourself) and
+Built with [Flutter](https://flutter.dev). See [Windows](docs/windows.md#building-it-yourself),
+[macOS](docs/macos.md#building-it-yourself) and
 [Android](docs/android.md#building-it-yourself) for the steps.
 
 The design notes are in [docs/DESIGN.md](docs/DESIGN.md).
@@ -63,7 +70,7 @@ The design notes are in [docs/DESIGN.md](docs/DESIGN.md).
 ## Credits & licenses
 
 - FoxyVPN: MIT license (see [LICENSE](LICENSE)). Based on [FoxyVPN by Vauth](https://github.com/Vauth/FoxyVPN), also MIT.
-- [tun2socks](https://github.com/xjasonlyu/tun2socks) by xjasonlyu (MIT) and
+- [tun2socks](https://github.com/xjasonlyu/tun2socks) by xjasonlyu (MIT) on Windows and macOS, and
   [Wintun](https://www.wintun.net/) by WireGuard LLC on Windows.
 - [hev-socks5-tunnel](https://github.com/heiher/hev-socks5-tunnel) by heiher (MIT) on Android.
 - Microsoft Visual C++ runtime DLLs, shipped next to the Windows app.

@@ -5,12 +5,14 @@
 //  * HTTP_PROXY / HTTPS_PROXY / ALL_PROXY variables,
 //  * other VPN adapters that are connected.
 // The result is a list of short, plain-English warnings for the UI. The parsers
-// are pure and tested; [ConflictDetector.detect] runs reg.exe and PowerShell.
+// are pure and tested; [ConflictDetector.detect] runs reg.exe and PowerShell
+// (macOS: only environment variables and `scutil --proxy`).
 
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import '../platform/host.dart';
 import 'windows_tun.dart' show tunName;
 
 // The per-user keys, relative to a user's hive. FoxyVPN runs elevated, and HKCU
@@ -139,6 +141,45 @@ SystemProxy parseInternetSettings(String regOutput) {
   return SystemProxy(
     servers: enabled && server != null ? parseProxyServer(server) : const [],
     pacUrl: pac == null || pac.isEmpty ? null : pac,
+  );
+}
+
+/// `scutil --proxy` (macOS): the system proxy of the active network. Only the
+/// top level of the dictionary counts; the nested `__SCOPED__` block repeats
+/// the same settings per interface. A proxy is on when its `...Enable` is 1.
+SystemProxy parseScutilProxy(String output) {
+  final top = <String, String>{};
+  var depth = 0;
+  final entry = RegExp(r'^\s*([A-Za-z0-9_]+)\s*:\s*(.*?)\s*$');
+  for (final line in const LineSplitter().convert(output)) {
+    final t = line.trim();
+    if (t.isEmpty) continue;
+    if (t == '}') {
+      if (depth > 0) depth--;
+      continue;
+    }
+    if (depth == 0) {
+      // The first line: `<dictionary> {`.
+      if (t.endsWith('{')) depth = 1;
+      continue;
+    }
+    final m = entry.firstMatch(line);
+    if (depth == 1 && m != null) top[m.group(1)!] = m.group(2)!;
+    if (t.endsWith('{')) depth++;
+  }
+  bool on(String key) => top[key] == '1';
+  final servers = <ProxyEndpoint>[];
+  for (final kind in const ['HTTP', 'HTTPS', 'SOCKS']) {
+    final host = top['${kind}Proxy'];
+    if (!on('${kind}Enable') || host == null || host.isEmpty) continue;
+    final port = int.tryParse(top['${kind}Port'] ?? '');
+    final endpoint = ProxyEndpoint(host, port != null && port >= 1 && port <= 65535 ? port : null);
+    if (!servers.contains(endpoint)) servers.add(endpoint);
+  }
+  final pac = top['ProxyAutoConfigURLString'];
+  return SystemProxy(
+    servers: servers,
+    pacUrl: on('ProxyAutoConfigEnable') && pac != null && pac.isNotEmpty ? pac : null,
   );
 }
 
@@ -310,8 +351,10 @@ List<String> buildConflicts({
   Map<String, String> envProxies = const {},
   List<VpnAdapter> vpnAdapters = const [],
   Map<int, ProcessInfo> listeners = const {},
+  bool mac = false,
 }) {
   final out = <String>[];
+  final computer = mac ? 'Mac' : 'PC';
 
   String? owner(ProxyEndpoint e) {
     final p = e.isLoopback && e.port != null ? listeners[e.port] : null;
@@ -322,7 +365,7 @@ List<String> buildConflicts({
     if (server.isLoopback) {
       final who = owner(server);
       out.add(
-        '${who == null ? 'A program on this PC' : 'Another app ($who)'} is set as your system '
+        '${who == null ? 'A program on this $computer' : 'Another app ($who)'} is set as your system '
         'proxy on ${server.text}. Apps that use it skip FoxyVPN. '
         'Turn its system proxy off while using FoxyVPN.',
       );
@@ -337,8 +380,11 @@ List<String> buildConflicts({
   final pac = systemProxy.pacUrl;
   if (pac != null) {
     out.add(
-      'Windows is set to use a proxy script ($pac). Apps that follow it may skip FoxyVPN. '
-      'Turn off "Use setup script" in Windows proxy settings while using FoxyVPN.',
+      mac
+          ? 'Your Mac is set to use a proxy script ($pac). Apps that follow it may skip FoxyVPN. '
+                'Turn off "Automatic Proxy Configuration" in the Proxies tab of your network settings while using FoxyVPN.'
+          : 'Windows is set to use a proxy script ($pac). Apps that follow it may skip FoxyVPN. '
+                'Turn off "Use setup script" in Windows proxy settings while using FoxyVPN.',
     );
   }
 
@@ -375,7 +421,7 @@ List<String> buildConflicts({
   }
   if (unreadable.isNotEmpty) {
     out.add(
-      'The ${_joinNames(unreadable)} ${unreadable.length == 1 ? 'setting is' : 'settings are'} set on this PC. '
+      'The ${_joinNames(unreadable)} ${unreadable.length == 1 ? 'setting is' : 'settings are'} set on this $computer. '
       'Programs that follow ${unreadable.length == 1 ? 'it' : 'them'} may skip FoxyVPN. '
       'Remove ${unreadable.length == 1 ? 'it' : 'them'} while using FoxyVPN.',
     );
@@ -417,9 +463,12 @@ class ConflictDetector {
     Map<String, String>? environment,
     Duration timeout = const Duration(seconds: 10),
   }) async {
-    if (run == null && !Platform.isWindows) return const [];
+    if (run == null && !Platform.isWindows && !Platform.isMacOS) return const [];
     final runner = run ?? _runForOutput;
     final env = environment ?? Platform.environment;
+    if (Host.isMacOS) {
+      return _detectMac(runner, env, timeout);
+    }
     final reg = '$_system32\\reg.exe';
     final powershell = '$_system32\\WindowsPowerShell\\v1.0\\powershell.exe';
 
@@ -476,6 +525,17 @@ class ConflictDetector {
       listeners: listeners,
     );
   }
+}
+
+/// macOS: the system proxy from scutil plus the proxy variables of this process.
+Future<List<String>> _detectMac(CommandRunner runner, Map<String, String> env, Duration timeout) async {
+  String scutil;
+  try {
+    scutil = await runner('/usr/sbin/scutil', ['--proxy']).timeout(timeout);
+  } catch (_) {
+    scutil = '';
+  }
+  return buildConflicts(systemProxy: parseScutilProxy(scutil), envProxies: proxyEnvVars(env), mac: true);
 }
 
 /// The SID of the user who owns explorer.exe in this process's session (the

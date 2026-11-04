@@ -1,5 +1,8 @@
 // Saves the sign-in tokens encrypted, so only this user can read them:
 //  * Windows: DPAPI, so only this Windows user account can read the file.
+//  * macOS: a plain JSON file (auth.json) with mode 0600 in a 0700 folder under
+//    ~/Library/Application Support, which only this user can read. No Keychain:
+//    an ad-hoc signed app would trigger Keychain prompts after every update.
 //  * Android: AES-GCM with a key in the Android Keystore (see
 //    android/.../SecureStore.kt), through the platform channel.
 
@@ -31,6 +34,8 @@ typedef _UnprotectDart = int Function(Pointer<_DataBlob>, Pointer<Pointer<Utf16>
 
 const _cryptprotectUiForbidden = 0x1;
 
+// Top-level finals in Dart are lazy: these libraries are only opened when the
+// first DPAPI call runs, which never happens on macOS or Android.
 final _crypt32 = DynamicLibrary.open('crypt32.dll');
 final _kernel32 = DynamicLibrary.open('kernel32.dll');
 final _protect = _crypt32.lookupFunction<_CryptNative, _CryptDart>('CryptProtectData');
@@ -68,16 +73,24 @@ class TokenStore {
   /// Android (no [file]): the Android Keystore store behind the platform
   /// channel; its values are loaded into memory at startup (see
   /// lib/platform/android_platform.dart), so this stays synchronous.
-  TokenStore([File? file]) : _file = file ?? (Host.isAndroid ? null : _defaultFile());
+  ///
+  /// macOS: a plain JSON file with permissions 0600 (see the top of this file).
+  /// [chmod] only exists for tests; it runs /bin/chmod by default.
+  TokenStore([File? file, void Function(String mode, String path)? chmod])
+      : _file = file ?? (Host.isAndroid ? null : _defaultFile()),
+        _chmod = chmod ?? _runChmod;
 
   final File? _file;
+  final void Function(String mode, String path) _chmod;
+
+  static void _runChmod(String mode, String path) {
+    final r = Process.runSync('/bin/chmod', [mode, path]);
+    if (r.exitCode != 0) throw OSError('chmod $mode failed: ${r.stderr}'.trim());
+  }
 
   static const _androidKey = 'auth';
 
-  static File _defaultFile() {
-    final appData = Platform.environment['APPDATA'] ?? Directory.systemTemp.path;
-    return File('$appData\\FoxyVPN\\auth.bin');
-  }
+  static File _defaultFile() => Host.dataFile(Host.isMacOS ? 'auth.json' : 'auth.bin');
 
   AuthTokens? load() {
     final file = _file;
@@ -89,7 +102,9 @@ class TokenStore {
         json = saved;
       } else {
         if (!file.existsSync()) return null;
-        json = utf8.decode(dpapiUnprotect(file.readAsBytesSync()));
+        json = Host.isMacOS
+            ? file.readAsStringSync()
+            : utf8.decode(dpapiUnprotect(file.readAsBytesSync()));
       }
       return AuthTokens.fromJson(jsonDecode(json) as Map<String, dynamic>);
     } catch (_) {
@@ -106,6 +121,20 @@ class TokenStore {
     }
     file.parent.createSync(recursive: true);
     final tmp = File('${file.path}.tmp');
+    if (Host.isMacOS) {
+      // Best effort: the file itself is locked down below either way.
+      try {
+        _chmod('700', file.parent.path);
+      } catch (_) {}
+      // Create it empty and lock it down before the tokens go in, so they are
+      // never readable by others, not even for a moment.
+      tmp.writeAsBytesSync(const [], flush: true);
+      _chmod('600', tmp.path);
+      tmp.writeAsStringSync(jsonEncode(tokens.toJson()), flush: true);
+      tmp.renameSync(file.path);
+      _chmod('600', file.path);
+      return;
+    }
     tmp.writeAsBytesSync(dpapiProtect(utf8.encode(jsonEncode(tokens.toJson()))), flush: true);
     tmp.renameSync(file.path);
   }

@@ -1,8 +1,9 @@
-// Windows only: FoxyVPN's notification-area ("system tray") icon and what
-// closing the window does.
+// Desktop (Windows and macOS): FoxyVPN's notification-area ("system tray")
+// icon, or its menu bar icon on a Mac, and what closing the window does.
 //
 // The icon itself is native (windows/runner/tray_icon.cpp, routed by
-// flutter_window.cpp over the "foxyvpn/tray" method channel). This side says
+// flutter_window.cpp; on macOS an NSStatusItem in macos/Runner, both over the
+// same "foxyvpn/tray" method channel). This side says
 // what it shows, reacts to its menu and decides what a close does:
 //
 //  * close (title bar X, Alt+F4) with "Keep running in the tray" on: the window
@@ -14,13 +15,14 @@
 //
 // Channel, Dart -> native:
 //   update {tooltip, connected, status, toggle, toggleEnabled} -> bool (icon shown)
-//   balloon {title, text} -> bool (notification shown)
+//   balloon {title, text} -> bool (notification shown; macOS: always false)
 //   quitting                 (icon goes away, show requests are ignored)
 // Native -> Dart:
 //   toggle                   (menu Connect / Disconnect)
 //   quit                     (menu Quit, Setup / Uninstall, Restart Manager)
 
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -28,6 +30,7 @@ import 'package:window_manager/window_manager.dart';
 
 import '../app_log.dart';
 import '../vpn_controller.dart';
+import 'host.dart';
 
 /// What the tray icon shows for one state of the app.
 @immutable
@@ -113,18 +116,22 @@ CloseAction closeActionFor({required bool quitting, required bool trayActive, re
 /// Text of the one-time notification, the first time the window is closed to the tray.
 const trayHintTitle = 'FoxyVPN is still running';
 
-String trayHintText({required bool connected}) =>
-    'FoxyVPN keeps running in the notification area${connected ? ' and the VPN stays connected' : ''}. '
-    'Click the fox icon to open it, or right-click it to quit. You can change this in Account.';
+String trayHintText({required bool connected}) => Host.isMacOS
+    ? 'FoxyVPN keeps running in the menu bar${connected ? ' and the VPN stays connected' : ''}. '
+          'Click the fox icon to open it or to quit. You can change this in Account.'
+    : 'FoxyVPN keeps running in the notification area${connected ? ' and the VPN stays connected' : ''}. '
+          'Click the fox icon to open it, or right-click it to quit. You can change this in Account.';
 
-/// The window and tray side of the Windows app (lib/main.dart adds it as the
+/// The window and tray side of the desktop app (lib/main.dart adds it as the
 /// window listener and calls [start] once the window is up).
 class WindowsShell with WindowListener {
   WindowsShell(
     this._controller, {
     required this.shutdownCap,
     this.channel = const MethodChannel('foxyvpn/tray'),
-  });
+    this.macExitDelay = const Duration(seconds: 2),
+    void Function(int)? exitProcess,
+  }) : _exitProcess = exitProcess ?? exit;
 
   final VpnController _controller;
 
@@ -133,6 +140,12 @@ class WindowsShell with WindowListener {
 
   /// Overall cap for the teardown on quit.
   final Duration shutdownCap;
+
+  /// macOS: how long destroy() gets to end the process (it asks the app to
+  /// terminate, which the native side allows once `quitting` was sent) before
+  /// the process is ended directly. Nothing is left to clean up by then.
+  final Duration macExitDelay;
+  final void Function(int) _exitProcess;
 
   bool _started = false;
   bool _quitting = false;
@@ -266,6 +279,11 @@ class WindowsShell with WindowListener {
       await windowManager.destroy();
     } catch (e) {
       AppLog.write('Exiting failed: $e');
+    }
+    if (Host.isMacOS) {
+      // Still here: terminate was refused or never came. The teardown is done.
+      await Future<void>.delayed(macExitDelay);
+      _exitProcess(0);
     }
   }
 }

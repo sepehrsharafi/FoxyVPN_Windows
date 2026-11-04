@@ -20,8 +20,7 @@ class SettingsStore {
 
   static File _defaultFile() {
     if (Host.isAndroid) return File('${AndroidPlatform.filesDir}/settings.json');
-    final appData = Platform.environment['APPDATA'] ?? Directory.systemTemp.path;
-    return File('$appData\\FoxyVPN\\settings.json');
+    return Host.dataFile('settings.json');
   }
 
   /// The email remembered at sign-in, or null.
@@ -43,8 +42,8 @@ class SettingsStore {
     _write();
   }
 
-  /// Windows: closing the window keeps FoxyVPN running in the notification
-  /// area (the VPN stays up). On unless the user switched it off.
+  /// Desktop: closing the window keeps FoxyVPN running in the notification
+  /// area / menu bar (the VPN stays up). On unless the user switched it off.
   bool get keepInTray => _values['keepInTray'] != false;
 
   void setKeepInTray(bool value) {
@@ -56,7 +55,7 @@ class SettingsStore {
     _write();
   }
 
-  /// Windows: the "FoxyVPN is still running in the tray" notice was shown
+  /// Desktop: the "FoxyVPN is still running in the tray" notice was shown
   /// (it is shown once, the first time the window is closed to the tray).
   bool get trayHintShown => _values['trayHintShown'] == true;
 

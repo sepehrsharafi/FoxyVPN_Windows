@@ -1,5 +1,6 @@
-// Append-only diagnostic log at %APPDATA%\FoxyVPN\log.txt (Android: log.txt in
-// the app's private files directory, shown by the in-app log page).
+// Append-only diagnostic log at %APPDATA%\FoxyVPN\log.txt (macOS:
+// ~/Library/Application Support/FoxyVPN/log.txt; Android: log.txt in the app's
+// private files directory, shown by the in-app log page).
 //
 // Size-capped (the old file is kept once as log.old.txt). Secrets are scrubbed
 // before anything is written, and callers must not log tokens or passwords in
@@ -22,8 +23,7 @@ class AppLog {
     final override = fileOverride;
     if (override != null) return override;
     if (Host.isAndroid) return File('${AndroidPlatform.filesDir}/log.txt');
-    final appData = Platform.environment['APPDATA'] ?? Directory.systemTemp.path;
-    return File('$appData\\FoxyVPN\\log.txt');
+    return Host.dataFile('log.txt');
   }
 
   /// Appends one timestamped line. Never throws.
@@ -56,17 +56,29 @@ class AppLog {
     }
   }
 
-  /// Opens the log in Notepad (it may not exist yet, so create it first).
-  /// Android has an in-app log page instead (see ui/screens/log_screen.dart).
-  static Future<void> open() async {
+  /// Opens the log in Notepad, or the default text editor on a Mac (it may not
+  /// exist yet, so create it first). Android has an in-app log page instead
+  /// (see ui/screens/log_screen.dart). [start] only exists for tests.
+  static Future<void> open({
+    Future<void> Function(String exe, List<String> args)? start,
+  }) async {
     if (Host.isAndroid) return;
     try {
       final f = file;
       f.parent.createSync(recursive: true);
       if (!f.existsSync()) f.writeAsStringSync('');
-      await Process.start('notepad.exe', [f.path], mode: ProcessStartMode.detached);
+      final (exe, args) = openLogCommand(f.path);
+      if (start != null) {
+        await start(exe, args);
+      } else {
+        await Process.start(exe, args, mode: ProcessStartMode.detached);
+      }
     } catch (_) {}
   }
+
+  /// The program that shows the log file.
+  static (String, List<String>) openLogCommand(String path) =>
+      Host.isMacOS ? ('/usr/bin/open', ['-t', path]) : ('notepad.exe', [path]);
 }
 
 String formatLine(DateTime time, String message) {
