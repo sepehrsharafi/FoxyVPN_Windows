@@ -454,7 +454,17 @@ jobs:
         timeout-minutes: 15
         run: |
           set -euo pipefail
-          sudo env "PATH=$PATH" bash macos_helper/ci/smoke.sh "$APP"
+          log="$RUNNER_TEMP/smoke.log"
+          if ! sudo env "PATH=$PATH" bash macos_helper/ci/smoke.sh "$APP" 2>&1 | tee "$log"; then
+            # The end of the log as annotations too: those are readable without
+            # signing in to GitHub (step logs are not).
+            tail -n 160 "$log" | split -l 40 - "$RUNNER_TEMP/smoke-part-"
+            for part in "$RUNNER_TEMP"/smoke-part-*; do
+              msg="$(sed -e 's/%/%25/g' -e 's/\r/%0D/g' "$part" | awk 'BEGIN{ORS="%0A"} {print}')"
+              echo "::error title=smoke test::$msg"
+            done
+            exit 1
+          fi
 
       - name: Build the disk image
         shell: bash
