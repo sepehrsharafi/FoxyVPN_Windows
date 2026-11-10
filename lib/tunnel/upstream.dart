@@ -119,6 +119,7 @@ class UpstreamSession {
     try {
       raw = await Socket.connect(address, server.port, timeout: timeout);
       raw.setOption(SocketOption.tcpNoDelay, true);
+      limitSendBuffer(raw, 256 * 1024);
       final tls = await SecureSocket.secure(
         raw,
         host: server.host,
@@ -236,6 +237,9 @@ class UpstreamSession {
 
   /// Flows currently running on this connection.
   int get activeStreams => _activeStreams;
+
+  /// The server's MAX_CONCURRENT_STREAMS, if it sent one.
+  int? get peerMaxStreams => _conn.peerMaxConcurrentStreams;
 
   /// Completes when the connection has closed or died.
   Future<void> get done => _done.future;

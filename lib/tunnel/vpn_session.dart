@@ -268,6 +268,38 @@ class VpnSession {
   Future<TunnelStream> _dialUdp(String host, int port) => _dialVia((upstream) => upstream.openUdp(host, port));
 
   Future<TunnelStream> _dialVia(Future<TunnelStream> Function(UpstreamSession) open) async {
+    try {
+      return await _dialViaInner(open);
+    } catch (e) {
+      _noteDialFailure(e);
+      rethrow;
+    }
+  }
+
+  final Map<String, (DateTime, int)> _dialFailures = {};
+
+  /// Logs why flows fail to open (the app only sees "host unreachable"), at
+  /// most once per 10 s per kind of failure, with how many were not logged.
+  void _noteDialFailure(Object e) {
+    final kind = e is UpstreamRejected ? 'HTTP ${e.status}' : e.runtimeType.toString();
+    final now = DateTime.now();
+    final last = _dialFailures[kind];
+    if (last != null && now.difference(last.$1) < const Duration(seconds: 10)) {
+      _dialFailures[kind] = (last.$1, last.$2 + 1);
+      return;
+    }
+    _dialFailures[kind] = (now, 0);
+    final skipped = last == null || last.$2 == 0 ? '' : ' (+${last.$2} more since the last such line)';
+    final up = _upstream;
+    final state = up == null
+        ? 'no upstream'
+        : 'upstream ${up.alive ? 'alive' : 'dead'}${up.alive && up.draining ? ', draining' : ''}, '
+              '${up.activeStreams} flows of max ${up.peerMaxStreams ?? '?'}';
+    final detail = e is UpstreamRejected && e.proxyStatus != null ? ' [${e.proxyStatus}]' : '';
+    _log?.call('Opening a flow failed: $e$detail; $state$skipped');
+  }
+
+  Future<TunnelStream> _dialViaInner(Future<TunnelStream> Function(UpstreamSession) open) async {
     var retriedToken = false;
     var drainRetries = 0;
     while (true) {

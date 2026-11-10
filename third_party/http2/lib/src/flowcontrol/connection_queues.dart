@@ -62,6 +62,7 @@ class ConnectionMessageQueueOut extends Object
     ensureNotClosingSync(() {
       if (!wasTerminated) {
         _messages.addLast(message);
+        if (message is HeadersMessage) _queuedHeaders++;
         _trySendMessages();
       }
     });
@@ -70,6 +71,7 @@ class ConnectionMessageQueueOut extends Object
   @override
   void onTerminated(Object? error) {
     _messages.clear();
+    _queuedHeaders = 0;
     closeWithError(error);
   }
 
@@ -89,11 +91,14 @@ class ConnectionMessageQueueOut extends Object
       //     * the next message is a non-flow control message (e.g. headers)
       //     * the connection window is positive
 
+      // PATCH(foxyvpn): or a HEADERS that may go ahead of queued DATA, see
+      // [_headersAhead] and PATCHES.md (12).
       bool canSend() =>
           _messages.isNotEmpty &&
           !_frameWriter.bufferIndicator.wouldBuffer &&
           (!_connectionWindow.positiveWindow.wouldBuffer ||
-              _messages.first is! DataMessage);
+              _messages.first is! DataMessage ||
+              _headersAhead() != null);
 
       if (canSend()) {
         // PATCH(foxyvpn): send up to [_kSendBudget] bytes per event-loop turn
@@ -101,6 +106,13 @@ class ConnectionMessageQueueOut extends Object
         // message per `Timer.run()`. See PATCHES.md (8).
         var budget = _kSendBudget;
         do {
+          final ahead = _headersAhead();
+          if (ahead != null) {
+            _messages.remove(ahead);
+            _writeHeaders(ahead);
+            budget -= 64;
+            continue;
+          }
           final message = _messages.first;
           budget -= message is DataMessage ? message.bytes.length + 9 : 64;
           _trySendMessage();
@@ -117,15 +129,44 @@ class ConnectionMessageQueueOut extends Object
     }
   }
 
+  /// PATCH(foxyvpn): HEADERS still queued (see PATCHES.md (12)).
+  int _queuedHeaders = 0;
+
+  /// PATCH(foxyvpn): a HEADERS queued behind DATA that may be sent before it
+  /// (see PATCHES.md (12)), or null. Opening a new stream must not wait until
+  /// every queued upload byte of other streams is out (or the connection
+  /// window opens again): on a slow uplink that took longer than the CONNECT
+  /// timeout, so new flows failed while an upload ran. Only a HEADERS with no
+  /// DATA of its own stream ahead of it qualifies (a trailer stays behind its
+  /// stream's DATA); everything else keeps its order.
+  HeadersMessage? _headersAhead() {
+    if (_queuedHeaders == 0 || _messages.first is! DataMessage) return null;
+    Set<int>? withData;
+    for (final m in _messages) {
+      if (m is DataMessage) {
+        (withData ??= <int>{}).add(m.streamId);
+      } else if (m is HeadersMessage &&
+          !(withData?.contains(m.streamId) ?? false)) {
+        return m;
+      }
+    }
+    return null;
+  }
+
+  void _writeHeaders(HeadersMessage message) {
+    _queuedHeaders--;
+    _frameWriter.writeHeadersFrame(
+      message.streamId,
+      message.headers,
+      endStream: message.endStream,
+    );
+  }
+
   void _trySendMessage() {
     var message = _messages.first;
     if (message is HeadersMessage) {
       _messages.removeFirst();
-      _frameWriter.writeHeadersFrame(
-        message.streamId,
-        message.headers,
-        endStream: message.endStream,
-      );
+      _writeHeaders(message);
     } else if (message is PushPromiseMessage) {
       _messages.removeFirst();
       _frameWriter.writePushPromiseFrame(

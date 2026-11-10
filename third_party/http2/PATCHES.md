@@ -74,3 +74,10 @@ only): download 5.0 -> 2.5 ms CPU per MB, upload 3.6 -> 2.6 ms per MB.
    socket) the peer sees RST_STREAM for an idle stream, a connection error
    (RFC 9113 6.4). Fastly then sends GOAWAY PROTOCOL_ERROR "unexpected stream
    id in RST_STREAM frame" and closes the connection with every flow on it.
+12. `lib/src/flowcontrol/connection_queues.dart`: a HEADERS queued behind
+   DATA of other streams is sent first (`_headersAhead`), also when the
+   connection window is used up. Stock 3.1.0 sends the queue strictly in
+   order, so while an upload filled the queue (or waited for window), every
+   new stream waited behind it and timed out. A HEADERS never passes DATA of
+   its own stream; RST_STREAM and everything else keep their order (and stay
+   behind their stream's HEADERS, see 11).

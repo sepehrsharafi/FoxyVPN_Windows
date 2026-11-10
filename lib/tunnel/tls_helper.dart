@@ -16,6 +16,23 @@ import '../app_log.dart';
 
 const helperExeName = 'foxy-tls.exe';
 
+/// Windows' SO_SNDBUF.
+const _soSndbufWindows = 0x1001;
+
+/// Caps [socket]'s kernel send buffer on Windows. The upstream connection
+/// carries every flow; Windows grows a send buffer to megabytes on a slow,
+/// laggy line, and an upload in it then holds back the small frames every
+/// download and every new flow needs (WINDOW_UPDATE, HEADERS) for seconds.
+/// See tls_helper/main.go (remoteSendBuffer).
+void limitSendBuffer(Socket socket, [int bytes = 64 * 1024]) {
+  if (!Platform.isWindows) return;
+  try {
+    socket.setRawOption(RawSocketOption.fromInt(RawSocketOption.levelSocket, _soSndbufWindows, bytes));
+  } catch (_) {
+    // Best effort: without it the connection still works.
+  }
+}
+
 /// A TLS connection made by the helper: [socket] to write to, [incoming] for
 /// what the server sent (the helper's reply line already taken off).
 class HelperTls {
@@ -85,6 +102,7 @@ class TlsHelper {
     final socket = await Socket.connect(InternetAddress.loopbackIPv4, _port, timeout: timeout);
     try {
       socket.setOption(SocketOption.tcpNoDelay, true);
+      limitSendBuffer(socket);
       socket.add(utf8.encode('$_secret ${address.address} $port $serverName\n'));
 
       final incoming = StreamController<Uint8List>();

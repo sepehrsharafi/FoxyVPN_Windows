@@ -60,4 +60,36 @@ void main() {
     await conn.terminate();
     await fromServer.close();
   });
+
+  test('a new stream opens while an upload waits for flow-control window', () async {
+    final toServer = StreamController<List<int>>();
+    final written = BytesBuilder();
+    toServer.stream.listen(written.add);
+    final fromServer = StreamController<List<int>>();
+    final conn = ClientTransportConnection.viaStreams(fromServer.stream, toServer.sink);
+
+    // The peer never sends WINDOW_UPDATE.
+    // Two uploads of 64 KiB each (their stream windows) are more than the
+    // shared 64 KiB connection window: the second one stays queued.
+    for (var u = 0; u < 2; u++) {
+      final upload = conn.makeRequest([
+        Header.ascii(':method', 'CONNECT'),
+        Header.ascii(':authority', 'upload$u.example:443'),
+      ]);
+      for (var i = 0; i < 4; i++) {
+        upload.outgoingMessages.add(DataStreamMessage(Uint8List(16384)));
+      }
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    final next = conn.makeRequest([
+      Header.ascii(':method', 'CONNECT'),
+      Header.ascii(':authority', 'example.com:443'),
+    ]);
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    expect(_frames(written.toBytes()), contains((_typeHeaders, next.id)),
+        reason: 'HEADERS of the new stream waited behind the stalled upload');
+    await conn.terminate();
+    await fromServer.close();
+  });
 }

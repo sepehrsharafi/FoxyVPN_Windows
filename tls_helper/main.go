@@ -43,6 +43,12 @@ const (
 	dialTimeout      = 10 * time.Second
 	handshakeTimeout = 15 * time.Second
 	headerTimeout    = 10 * time.Second
+
+	// remoteSendBuffer bounds what waits in the kernel to go to Mozilla's
+	// server; localReadBuffer what waits between the app and this helper
+	// (see connect and serve).
+	remoteSendBuffer = 256 << 10
+	localReadBuffer  = 64 << 10
 )
 
 var (
@@ -91,6 +97,12 @@ func main() {
 
 func serve(local net.Conn) {
 	defer local.Close()
+	if tcp, ok := local.(*net.TCPConn); ok {
+		_ = tcp.SetNoDelay(true)
+		// Upload data the app sent but we could not pass on yet stays small,
+		// so the app feels the backpressure (see remoteSendBuffer).
+		_ = tcp.SetReadBuffer(localReadBuffer)
+	}
 	_ = local.SetDeadline(time.Now().Add(headerTimeout))
 	r := bufio.NewReaderSize(local, 512)
 	line, err := r.ReadString('\n')
@@ -161,6 +173,14 @@ func connect(ip net.IP, port int, name string) (net.Conn, string, error) {
 	}
 	if tcp, ok := raw.(*net.TCPConn); ok {
 		_ = tcp.SetNoDelay(true)
+		// Every flow shares this one connection. Windows grows a send buffer
+		// to megabytes on a slow, laggy line; an upload then fills it and the
+		// small frames behind it (WINDOW_UPDATE for every download, HEADERS
+		// for every new flow, PING) wait seconds: downloads stall and new
+		// flows time out while anything uploads. A fixed buffer keeps that
+		// wait short (256 KiB is a quarter second at 1 MB/s) and still lets
+		// one connection upload 256 KiB per round trip.
+		_ = tcp.SetWriteBuffer(remoteSendBuffer)
 	}
 	conn := utls.UClient(raw, &utls.Config{
 		ServerName:         name,
