@@ -83,6 +83,8 @@ class VpnController extends ChangeNotifier {
     this.cancelWait = connectCancelWait,
     this.exitCheckDelay = const Duration(seconds: 2),
     this.quickConnectTimeout = const Duration(seconds: 6),
+    this.recommendedPingCutoff = const Duration(milliseconds: 700),
+    this.recommendedPingMax = const Duration(seconds: 3),
     this.locationsMaxAge = const Duration(minutes: 2),
     this.statsInterval = const Duration(seconds: 1),
     DateTime Function()? clock,
@@ -150,6 +152,14 @@ class VpnController extends ChangeNotifier {
   /// and pings before it picks from what it has.
   final Duration quickConnectTimeout;
 
+  /// Connecting with Recommended pings every location again and waits this long
+  /// at most: a location slower than this would not be picked anyway. If none
+  /// has answered by then, the first answer is taken.
+  final Duration recommendedPingCutoff;
+
+  /// The longest Connect waits for any ping to answer before it uses Mozilla's pick.
+  final Duration recommendedPingMax;
+
   /// Quick connect measures again if the pings are older than this.
   final Duration locationsMaxAge;
 
@@ -168,6 +178,7 @@ class VpnController extends ChangeNotifier {
   int? _passQuotaRemaining;
   int? _passQuotaMax;
   DateTime? _passQuotaResetsAt;
+  bool _passQuotaUnlimited = false;
 
   // --- locations -------------------------------------------------------------
   List<Location> _locations = [];
@@ -452,6 +463,7 @@ class VpnController extends ChangeNotifier {
     _passQuotaRemaining = null;
     _passQuotaMax = null;
     _passQuotaResetsAt = null;
+    _passQuotaUnlimited = false;
     _notify();
   }
 
@@ -472,6 +484,7 @@ class VpnController extends ChangeNotifier {
       _passQuotaRemaining = pass.quotaRemaining;
       _passQuotaMax = pass.quotaMax;
       _passQuotaResetsAt = pass.quotaResetsAt;
+      _passQuotaUnlimited = pass.quotaUnlimited;
       _accountError = null;
     } on QuotaExceeded catch (e) {
       // Not an account problem: the sign-in works, the month's data is gone.
@@ -491,6 +504,7 @@ class VpnController extends ChangeNotifier {
   /// allowance and reset date are kept (or taken from the response).
   void _markQuotaUsedUp(QuotaExceeded e) {
     _passQuotaRemaining = 0;
+    _passQuotaUnlimited = false;
     _passQuotaMax = e.quotaMax ?? _passQuotaMax;
     _passQuotaResetsAt = e.quotaResetsAt ?? _passQuotaResetsAt;
   }
@@ -498,6 +512,8 @@ class VpnController extends ChangeNotifier {
   int? get quotaRemaining => _session?.quotaRemaining ?? _passQuotaRemaining;
   int? get quotaMax => _session?.quotaMax ?? _passQuotaMax;
   DateTime? get quotaResetsAt => _session?.quotaResetsAt ?? _passQuotaResetsAt;
+  /// Mozilla reports no monthly cap for this account right now.
+  bool get quotaUnlimited => _session?.quotaUnlimited ?? _passQuotaUnlimited;
 
   /// Friendly text if the account check failed.
   String? get accountError => _accountError;
@@ -508,6 +524,8 @@ class VpnController extends ChangeNotifier {
     _passQuotaRemaining = session.quotaRemaining ?? _passQuotaRemaining;
     _passQuotaMax = session.quotaMax ?? _passQuotaMax;
     _passQuotaResetsAt = session.quotaResetsAt ?? _passQuotaResetsAt;
+    // A session that never got a pass knows nothing; keep what was known then.
+    _passQuotaUnlimited = session.quotaUnlimited || (session.quotaRemaining == null && _passQuotaUnlimited);
   }
 
   // ---------------------------------------------------------------------------
@@ -981,13 +999,71 @@ class VpnController extends ChangeNotifier {
     return _selected;
   }
 
+  /// Pings every real location now and gives the fastest of the answers that
+  /// came within [recommendedPingCutoff] (when none had come by then, the first
+  /// one after it). [fallback] (Recommended: Mozilla's own pick) when nothing
+  /// answers. Old pings are not used: the connection may have stopped working
+  /// because the old fastest location got slow. The answers show in the list too.
+  Future<Location> _measureFastest({required Location fallback}) async {
+    final batch = [for (final l in _locations) if (!l.isRecommended) l];
+    if (batch.isEmpty) return fallback;
+    final answers = <Location, int>{};
+    final enough = Completer<void>();
+    var waiting = batch.length;
+    var cutoffPassed = false;
+    void check() {
+      if (enough.isCompleted) return;
+      if (waiting == 0 || (cutoffPassed && answers.isNotEmpty)) enough.complete();
+    }
+
+    final cutoff = Timer(recommendedPingCutoff, () {
+      cutoffPassed = true;
+      check();
+    });
+    final giveUp = Timer(recommendedPingMax, () {
+      if (!enough.isCompleted) enough.complete();
+    });
+    _pinging.addAll(batch);
+    _notify();
+    for (final location in batch) {
+      unawaited(() async {
+        int? ms;
+        try {
+          ms = await _ping(location.servers.first);
+        } catch (_) {}
+        waiting--;
+        if (!_disposed) {
+          // A late reply that came after the tunnel went up means nothing.
+          if (_session == null && !_tunStarting) _pings[location] = ms;
+          _pinging.remove(location);
+          _sortedCache = null;
+          _notifySoon();
+        }
+        if (ms != null && !enough.isCompleted) answers[location] = ms;
+        check();
+      }());
+    }
+    await enough.future;
+    cutoff.cancel();
+    giveUp.cancel();
+    Location? best;
+    for (final e in answers.entries) {
+      if (best == null || e.value < answers[best]!) best = e.key;
+    }
+    if (best == null) {
+      AppLog.write('Recommended: no location answered a ping; using Mozilla\'s pick');
+      return fallback;
+    }
+    AppLog.write('Recommended: ${best.label} (${answers[best]} ms, ${answers.length} of ${batch.length} answered in time)');
+    return best;
+  }
+
   Future<void> connect() {
     final selected = _selected;
     if (selected == null || state != ConnState.idle || _shuttingDown) return Future.value();
-    // Recommended = the fastest location right now (by the pings made before connecting).
-    final location = selected.isRecommended ? (fastestLocation ?? selected) : selected;
-    if (!identical(location, selected)) AppLog.write('Recommended: ${location.label} (${_pings[location]} ms)');
-    final future = _doConnect(location);
+    // Recommended = the fastest location right now: _doConnect pings them all
+    // again first. A location picked by hand is connected to as it is.
+    final future = _doConnect(selected, pickFastest: selected.isRecommended);
     _connectFuture = future;
     return future.whenComplete(() {
       if (identical(_connectFuture, future)) _connectFuture = null;
@@ -1010,7 +1086,7 @@ class VpnController extends ChangeNotifier {
     return true;
   }
 
-  Future<void> _doConnect(Location location) async {
+  Future<void> _doConnect(Location location, {bool pickFastest = false}) async {
     _cancelConnect = false;
     _connecting = true;
     _error = null;
@@ -1019,6 +1095,10 @@ class VpnController extends ChangeNotifier {
     VpnSession? session;
     TunBackend? tun;
     try {
+      if (pickFastest) {
+        location = await _measureFastest(fallback: location);
+        if (await _abortIfCancelled(null, null)) return;
+      }
       // Android: the VPN permission dialog comes first, before any session or
       // quota is used. macOS: the network helper is installed here (the Mac
       // password, once). Nothing to do on Windows.

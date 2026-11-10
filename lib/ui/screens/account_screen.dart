@@ -94,6 +94,7 @@ class _AccountScreenState extends State<AccountScreen> {
                                   remaining: controller.quotaRemaining,
                                   max: controller.quotaMax,
                                   resetsAt: controller.quotaResetsAt,
+                                  unlimited: controller.quotaUnlimited,
                                 ),
                                 const SizedBox(height: 12),
                                 // Android: the app itself is outside the VPN, but v1 does not
@@ -248,8 +249,10 @@ class _IdentityCard extends StatelessWidget {
 }
 
 class _DataCard extends StatelessWidget {
-  const _DataCard({required this.remaining, required this.max, required this.resetsAt});
+  const _DataCard({required this.remaining, required this.max, required this.resetsAt, this.unlimited = false});
 
+  /// Mozilla reports no monthly cap for this account right now.
+  final bool unlimited;
   final int? remaining;
   final int? max;
   final DateTime? resetsAt;
@@ -259,6 +262,20 @@ class _DataCard extends StatelessWidget {
     final left = remaining;
     final total = max;
     final reset = resetsAt == null ? null : formatResetDate(resetsAt!.toLocal());
+
+    if (unlimited) {
+      return AppCard(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text('Data left', style: FoxyText.title),
+            const SizedBox(height: 4),
+            Text('Unlimited: Mozilla reports no monthly cap for this account right now.', style: FoxyText.caption),
+          ],
+        ),
+      );
+    }
 
     // Nothing known yet (or the account check failed): the card keeps its place.
     if (left == null && total == null && resetsAt == null) {

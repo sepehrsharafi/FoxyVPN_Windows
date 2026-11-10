@@ -329,6 +329,33 @@ void main() {
     );
   });
 
+  test('an unlimited pass drops the quota numbers; a capped one keeps them; both are logged', () async {
+    var unlimited = true;
+    final origin = await serve([], (r) {
+      if (unlimited) r.response.headers.set('X-Quota-Unlimited', 'true');
+      r.response.headers
+        ..set('X-Quota-Limit', '53687091200')
+        ..set('X-Quota-Remaining', '53687091200')
+        ..set('X-Quota-Reset', '2026-12-01T00:00:00Z');
+      return reply(r, 200, body: '{"token":"pass","expires_at":4102444800}');
+    });
+    final client = GuardianClient(endpoint: 'http://$mozillaHost:${origin.port}');
+    final free = await client.proxyPass('t');
+    expect(free.quotaUnlimited, isTrue);
+    expect(free.quotaMax, isNull);
+    expect(free.quotaRemaining, isNull);
+    expect(free.quotaResetsAt, isNull);
+    unlimited = false;
+    final capped = await client.proxyPass('t');
+    expect(capped.quotaUnlimited, isFalse);
+    expect(capped.quotaMax, 53687091200);
+    expect(capped.quotaRemaining, 53687091200);
+    expect(await log(), allOf(contains('Quota from Mozilla: unlimited=true'), contains('unlimited=- limit=53687091200')));
+    expect(isQuotaUnlimited(' TRUE '), isTrue);
+    expect(isQuotaUnlimited('false'), isFalse);
+    expect(isQuotaUnlimited(null), isFalse);
+  });
+
   test('the server list goes through sendJson and keeps its error behavior', () async {
     final body = jsonEncode({'data': []});
     final ok = await serve([], (r) => reply(r, 200, body: body));

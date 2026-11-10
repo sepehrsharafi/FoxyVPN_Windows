@@ -62,6 +62,7 @@ class VpnSession {
   int? _quotaAtFetch;
   int? _quotaMax;
   DateTime? _quotaResetsAt;
+  bool _quotaUnlimited = false;
   int _bytesAtFetch = 0;
   VpnPhase _phase = VpnPhase.connecting;
   bool _stopped = false;
@@ -124,6 +125,8 @@ class VpnSession {
 
   /// When Mozilla resets the monthly allowance, if it told us.
   DateTime? get quotaResetsAt => _quotaResetsAt;
+  /// Mozilla reports no monthly cap for this account (the last pass said so).
+  bool get quotaUnlimited => _quotaUnlimited;
 
   /// A plain HTTPS GET to [host] whose TCP connection is dialled through the
   /// tunnel (so the server sees the exit IP). Returns the body of a 200 answer;
@@ -207,8 +210,10 @@ class VpnSession {
     if (_stopped) return;
     _token = pass.token;
     _quotaAtFetch = pass.quotaRemaining;
-    _quotaMax = pass.quotaMax ?? _quotaMax;
-    _quotaResetsAt = pass.quotaResetsAt ?? _quotaResetsAt;
+    _quotaUnlimited = pass.quotaUnlimited;
+    // An unlimited pass carries no numbers; an old cap must not linger.
+    _quotaMax = pass.quotaUnlimited ? null : pass.quotaMax ?? _quotaMax;
+    _quotaResetsAt = pass.quotaUnlimited ? null : pass.quotaResetsAt ?? _quotaResetsAt;
     _bytesAtFetch = _stopped || !_socksReady ? 0 : bytesUp + bytesDown;
     _upstream?.updateToken(pass.token);
     final expiry = pass.expiresAt;
@@ -230,6 +235,7 @@ class VpnSession {
     } on QuotaExceeded catch (e) {
       // So the controller, which keeps this session's estimate, learns "used up".
       _quotaAtFetch = 0;
+      _quotaUnlimited = false;
       _quotaMax = e.quotaMax ?? _quotaMax;
       _quotaResetsAt = e.quotaResetsAt ?? _quotaResetsAt;
       _fail(e.message);

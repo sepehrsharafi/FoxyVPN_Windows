@@ -79,6 +79,8 @@ class _Session implements VpnSession {
 
   @override
   DateTime? get quotaResetsAt => null;
+  @override
+  bool get quotaUnlimited => false;
 
   @override
   Future<void> stop() async => events.add('session stop');

@@ -104,6 +104,8 @@ class _FakeSession implements VpnSession {
 
   @override
   DateTime? get quotaResetsAt => null;
+  @override
+  bool get quotaUnlimited => false;
 
   @override
   Future<void> stop() async => _events.add('session stop');
@@ -845,20 +847,20 @@ void main() {
       await c.init();
       final connecting = c.connect();
       await Future<void>.delayed(const Duration(milliseconds: 10));
-      expect(events, ['session start rec', 'tun start']);
+      expect(events, ['session start par', 'tun start']);
 
       var shutdownDone = false;
       final shutdown = c.shutdown().then((_) => shutdownDone = true);
       // Well past the (shortened) wait for a connect that is still reaching the server.
       await Future<void>.delayed(const Duration(milliseconds: 250));
       expect(shutdownDone, isFalse, reason: 'the tunnel start is bounded by its own timeouts and must be awaited');
-      expect(events, ['session start rec', 'tun start']);
+      expect(events, ['session start par', 'tun start']);
 
       tunGate.complete();
       await shutdown;
       await connecting;
       expect(events, [
-        'session start rec',
+        'session start par',
         'tun start',
         'tun started',
         'tun stop',
@@ -897,11 +899,11 @@ void main() {
       final stopwatch = Stopwatch()..start();
       await c.shutdown();
       expect(stopwatch.elapsedMilliseconds, lessThan(1000));
-      expect(events, ['session start rec']);
+      expect(events, ['session start par']);
 
       sessionGate.complete(); // the stuck connect finally returns: it must clean up by itself
       await connecting;
-      expect(events, ['session start rec', 'session stop']);
+      expect(events, ['session start par', 'session stop']);
       expect(c.state, ConnState.idle);
     });
 
@@ -919,11 +921,123 @@ void main() {
       await select;
       await first;
 
-      expect(sessionsFor.map((l) => l.cityCode), ['rec', 'ber']);
+      expect(sessionsFor.map((l) => l.cityCode), ['par', 'ber']);
       expect(c.state, ConnState.connected);
       expect(c.selected, same(berlin));
       await c.shutdown();
       expect(c.state, ConnState.idle);
+    });
+  });
+
+  group('Recommended measures again on every connect', () {
+    late List<String> connectedTo;
+    late Map<String, ({int? ms, Duration after})> replies;
+    late int pingCalls;
+
+    VpnController build({Duration cutoff = const Duration(milliseconds: 100)}) => VpnController(
+      account: account,
+      settings: settings,
+      cleanup: () async {},
+      loadLocations: () async => [tokyo, berlin, rec, paris],
+      ping: (node) async {
+        pingCalls++;
+        final r = replies[node.host.split('.').first] ?? (ms: null, after: Duration.zero);
+        await Future<void>.delayed(r.after);
+        return r.ms;
+      },
+      detectConflicts: () async => const [],
+      startSession:
+          ({
+            required Account account,
+            required Location location,
+            void Function(String message)? log,
+            Future<void> Function()? beforeReconnect,
+            bool directFallback = false,
+          }) async {
+            connectedTo.add(location.cityCode);
+            return _FakeSession([]);
+          },
+      startTun:
+          ({
+            required int socksPort,
+            required InternetAddress bypass,
+            List<InternetAddress> extraBypass = const [],
+            void Function(String)? log,
+          }) async => _FakeTun([]),
+      recommendedPingCutoff: cutoff,
+      recommendedPingMax: const Duration(seconds: 2),
+    );
+
+    setUp(() {
+      connectedTo = [];
+      pingCalls = 0;
+      replies = {
+        'ber': (ms: 80, after: Duration.zero),
+        'par': (ms: 30, after: Duration.zero),
+        'tyo': (ms: null, after: Duration.zero),
+      };
+    });
+
+    test('a reconnect pings again and goes to the location that is fastest now', () async {
+      final c = build();
+      await c.init();
+      await c.connect();
+      expect(connectedTo, ['par']);
+      await c.disconnect();
+
+      // Paris got slow meanwhile: the old pings would still say Paris.
+      replies['par'] = (ms: 400, after: Duration.zero);
+      await c.connect();
+      expect(connectedTo, ['par', 'ber']);
+      expect(c.selected!.isRecommended, isTrue, reason: 'the choice stays Recommended');
+      expect(c.pingOf(berlin), 80, reason: 'the new pings show in the list');
+      await c.shutdown();
+    });
+
+    test('a location picked by hand is connected to without pinging', () async {
+      final c = build();
+      await c.init();
+      await Future<void>.delayed(const Duration(milliseconds: 20)); // the startup pings are done
+      await c.select(tokyo);
+      final before = pingCalls;
+      await c.connect();
+      expect(connectedTo, ['tyo']);
+      expect(pingCalls, before);
+      await c.shutdown();
+    });
+
+    test('slow locations are not waited for past the cutoff', () async {
+      final c = build();
+      await c.init();
+      // Tokyo would win, but answers long after the cutoff.
+      replies['tyo'] = (ms: 5, after: const Duration(milliseconds: 1500));
+      final watch = Stopwatch()..start();
+      await c.connect();
+      expect(connectedTo, ['par']);
+      expect(watch.elapsedMilliseconds, lessThan(1000));
+      await c.shutdown();
+    });
+
+    test('with no answer by the cutoff, the first answer after it is taken', () async {
+      final c = build();
+      await c.init();
+      replies
+        ..['par'] = (ms: 300, after: const Duration(milliseconds: 300))
+        ..['ber'] = (ms: 250, after: const Duration(milliseconds: 1200));
+      final watch = Stopwatch()..start();
+      await c.connect();
+      expect(connectedTo, ['par']);
+      expect(watch.elapsedMilliseconds, lessThan(1000));
+      await c.shutdown();
+    });
+
+    test('with no answer at all, Recommended (Mozilla\'s pick) is used', () async {
+      final c = build();
+      await c.init();
+      replies = {};
+      await c.connect();
+      expect(connectedTo, ['rec']);
+      await c.shutdown();
     });
   });
 }

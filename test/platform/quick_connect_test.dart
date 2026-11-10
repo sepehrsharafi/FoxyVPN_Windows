@@ -71,6 +71,8 @@ class _Session implements VpnSession {
 
   @override
   DateTime? get quotaResetsAt => null;
+  @override
+  bool get quotaUnlimited => false;
 
   @override
   Future<void> stop() async {}
@@ -371,10 +373,13 @@ void main() {
       final c = make();
       final quick = c.quickConnectFastest();
       await pumpEventQueue();
-      await c.connect(); // the user pressed the power button in the app (Recommended)
+      // The user pressed the power button in the app (Recommended): it pings
+      // again itself and connects to the fastest; the tile then leaves it alone.
+      final inApp = c.connect();
       holdPings!.complete();
+      await inApp;
       await quick;
-      expect(connects, ['rec']);
+      expect(connects, ['ber']);
     });
   });
 

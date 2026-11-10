@@ -16,6 +16,15 @@ void main() {
     expect(find.text('Firefox account'), findsOneWidget);
   }
 
+  testWidgets('an unlimited account says so on Account and Home, not "50 of 50"', (tester) async {
+    final c = FakeVpnController()..quotaUnlimited = true;
+    await pumpApp(tester, c);
+    expect(find.text('Unlimited data'), findsOneWidget);
+    await tapAndSlide(tester, find.byTooltip('Account'));
+    expect(find.text('Unlimited: Mozilla reports no monthly cap for this account right now.'), findsOneWidget);
+    expect(find.textContaining('left of'), findsNothing);
+  });
+
   testWidgets('shows the identity, data, rows and version', (tester) async {
     final c = FakeVpnController();
     await openAccount(tester, c);

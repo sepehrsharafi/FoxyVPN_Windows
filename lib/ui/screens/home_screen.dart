@@ -216,6 +216,7 @@ class _TopRow extends StatelessWidget {
   /// "11.0 GB left" (the reset date lives on the Account page), or the
   /// problem, in danger red.
   ({String text, bool problem})? _caption() {
+    if (controller.quotaUnlimited) return (text: 'Unlimited data', problem: false);
     final left = controller.quotaRemaining;
     if (left != null) {
       if (left <= 0) return (text: 'No data left', problem: true);

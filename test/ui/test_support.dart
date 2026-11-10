@@ -176,6 +176,9 @@ class FakeVpnController extends ChangeNotifier implements VpnController {
   DateTime? get quotaResetsAt => _quotaResetsAt;
 
   @override
+  bool quotaUnlimited = false;
+
+  @override
   String? get accountError => _accountError;
 
   /// Like the real controller: Recommended first, then by ping (no reply

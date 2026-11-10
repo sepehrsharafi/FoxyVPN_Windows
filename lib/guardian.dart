@@ -4,6 +4,7 @@
 
 import 'dart:convert';
 
+import 'app_log.dart';
 import 'control_relay.dart';
 import 'http_util.dart';
 
@@ -32,12 +33,23 @@ class TokenRejected extends GuardianError {
 }
 
 class ProxyPass {
-  ProxyPass({required this.token, this.expiresAt, this.quotaMax, this.quotaRemaining, this.quotaResetsAt});
+  ProxyPass({
+    required this.token,
+    this.expiresAt,
+    this.quotaMax,
+    this.quotaRemaining,
+    this.quotaResetsAt,
+    this.quotaUnlimited = false,
+  });
   final String token;
   final DateTime? expiresAt;
   final int? quotaMax;
   final int? quotaRemaining;
   final DateTime? quotaResetsAt;
+
+  /// Mozilla sent `X-Quota-Unlimited: true`: no monthly cap for this account now.
+  /// Then the other quota numbers mean nothing and are left out, as in Firefox.
+  final bool quotaUnlimited;
 }
 
 /// Parses Mozilla's X-Quota-Reset header. Its format isn't documented, so accept
@@ -76,14 +88,21 @@ class GuardianClient {
     if (token.isEmpty) throw GuardianError('Proxy pass response had no token.');
     final expiresAt = (body['expires_at'] as num?)?.toInt();
     int? header(String name) => int.tryParse(response.headers.value(name) ?? '');
+    final unlimited = isQuotaUnlimited(response.headers.value('x-quota-unlimited'));
+    // What Mozilla said about the quota, as it said it (the numbers only, no token).
+    AppLog.write('Quota from Mozilla: unlimited=${response.headers.value('x-quota-unlimited') ?? '-'} '
+        'limit=${response.headers.value('x-quota-limit') ?? '-'} '
+        'remaining=${response.headers.value('x-quota-remaining') ?? '-'} '
+        'reset=${response.headers.value('x-quota-reset') ?? '-'}');
     return ProxyPass(
       token: token,
       expiresAt: expiresAt != null && expiresAt > 0
           ? DateTime.fromMillisecondsSinceEpoch(expiresAt * 1000)
           : _jwtExpiry(token),
-      quotaMax: header('x-quota-limit'),
-      quotaRemaining: header('x-quota-remaining'),
-      quotaResetsAt: parseQuotaReset(response.headers.value('x-quota-reset')),
+      quotaMax: unlimited ? null : header('x-quota-limit'),
+      quotaRemaining: unlimited ? null : header('x-quota-remaining'),
+      quotaResetsAt: unlimited ? null : parseQuotaReset(response.headers.value('x-quota-reset')),
+      quotaUnlimited: unlimited,
     );
   }
 
@@ -130,3 +149,6 @@ DateTime? _jwtExpiry(String token) {
     return null;
   }
 }
+
+/// Mozilla's `X-Quota-Unlimited` header says "true" (any case, spaces ignored).
+bool isQuotaUnlimited(String? value) => value?.trim().toLowerCase() == 'true';
