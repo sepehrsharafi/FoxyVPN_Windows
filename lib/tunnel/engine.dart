@@ -40,6 +40,15 @@ class EngineUpstream implements Upstream {
     InternetAddress? pinnedAddress,
     Duration timeout = const Duration(seconds: 15),
     EngineStarter? starter,
+
+    /// The loopback port the engine's SOCKS5 server should use (the previous
+    /// one when the engine is restarted); null lets the engine pick one.
+    int? socksPort,
+
+    /// [onAuthFailed] runs at most once per [authFailedInterval] when the edge
+    /// rejected the token, so the app renews the pass.
+    void Function()? onAuthFailed,
+    Duration authFailedInterval = const Duration(seconds: 10),
   }) async {
     final address = pinnedAddress ?? await UpstreamSession.resolveIPv4(server.host, timeout);
     final process = await (starter ?? _defaultStarter)(executable, [
@@ -47,8 +56,12 @@ class EngineUpstream implements Upstream {
       '${server.host}:${server.port}',
       '--ip',
       address.address,
+      '--socks',
+      if (socksPort != null) ...['--socks-port', '$socksPort'],
     ]);
-    final engine = EngineUpstream._(process, address);
+    final engine = EngineUpstream._(process, address)
+      ..onAuthFailed = onAuthFailed
+      .._authFailedInterval = authFailedInterval;
     try {
       await engine._handshake(token, timeout);
     } catch (_) {
@@ -70,6 +83,21 @@ class EngineUpstream implements Upstream {
   late final StreamSubscription<String> _errSub;
   int _port = 0;
   String _secret = '';
+  int? _socksPort;
+  int _bytesUp = 0;
+  int _bytesDown = 0;
+  DateTime? _lastAuthFailed;
+  Duration _authFailedInterval = const Duration(seconds: 10);
+
+  /// Invoked when the engine reports `auth_failed` (rate limited here as well).
+  void Function()? onAuthFailed;
+
+  /// The engine's SOCKS5 port on 127.0.0.1, once it reported one.
+  int? get socksPort => _socksPort;
+
+  /// Cumulative payload bytes through the engine's SOCKS server (from the client / to it).
+  int get bytesUp => _bytesUp;
+  int get bytesDown => _bytesDown;
   bool _closed = false;
   bool _exited = false;
   int _activeStreams = 0;
@@ -117,9 +145,23 @@ class EngineUpstream implements Upstream {
       case 'listening':
         final port = event['port'];
         final secret = event['secret'];
+        final socks = event['socks_port'];
+        if (socks is int && socks > 0) _socksPort = socks;
         if (port is int && secret is String && !_listening.isCompleted) {
           _listening.complete((port, secret));
         }
+      case 'stats':
+        final up = event['up'];
+        final down = event['down'];
+        if (up is int && up >= 0) _bytesUp = up;
+        if (down is int && down >= 0) _bytesDown = down;
+      case 'auth_failed':
+        final now = DateTime.now();
+        final last = _lastAuthFailed;
+        if (last != null && now.difference(last) < _authFailedInterval) return;
+        _lastAuthFailed = now;
+        _log('the edge rejected the token');
+        onAuthFailed?.call();
       case 'connected':
         _log('connected (${event['tls'] ?? '?'})');
         if (!_connected.isCompleted) _connected.complete();

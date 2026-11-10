@@ -36,6 +36,7 @@ Future<Upstream> defaultUpstreamConnector(
   required String token,
   InternetAddress? pinnedAddress,
   Duration timeout = const Duration(seconds: 15),
+  int? socksPort,
 }) async {
   final engine = await findEngine();
   if (engine != null) {
@@ -46,6 +47,7 @@ Future<Upstream> defaultUpstreamConnector(
         executable: engine,
         pinnedAddress: pinnedAddress,
         timeout: timeout,
+        socksPort: socksPort,
       );
     } catch (e) {
       AppLog.write('foxy-core did not start ($e); using the built-in HTTP/2 client');

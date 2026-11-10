@@ -24,19 +24,22 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"time"
 )
 
 func main() {
 	server := flag.String("server", "", "edge host:port (SNI and :authority of CONNECT-UDP)")
 	ip := flag.String("ip", "", "pinned IPv4 of the edge")
 	sndbuf := flag.Int("sndbuf", 0, "kernel send buffer in bytes (0 = OS default)")
+	socks := flag.Bool("socks", false, "serve SOCKS5 (CONNECT, UDP ASSOCIATE) on 127.0.0.1")
+	socksPort := flag.Int("socks-port", 0, "SOCKS5 port (0 = any)")
 	testRoot := flag.String("test-root", "", "") // hidden: extra trusted root PEM file, for tests only
 	flag.Parse()
 
 	host, portS, err := net.SplitHostPort(*server)
 	port, perr := strconv.Atoi(portS)
 	if err != nil || perr != nil || net.ParseIP(*ip) == nil {
-		fmt.Fprintln(os.Stderr, "usage: foxy-core --server host:port --ip IPv4 [--sndbuf N]")
+		fmt.Fprintln(os.Stderr, "usage: foxy-core --server host:port --ip IPv4 [--sndbuf N] [--socks [--socks-port N]]")
 		os.Exit(2)
 	}
 	if *testRoot != "" {
@@ -64,7 +67,17 @@ func main() {
 
 	up := newUpstream(host, port, *ip, *sndbuf, ev)
 	f := &flows{up: up, secret: secret, serverAuthority: *server}
-	ev.listening(ln.Addr().(*net.TCPAddr).Port, secret)
+	socksLn, sp := (net.Listener)(nil), 0
+	if *socks {
+		var err error
+		socksLn, err = net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(*socksPort)))
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "socks listen:", err)
+			os.Exit(1)
+		}
+		sp = socksLn.Addr().(*net.TCPAddr).Port
+	}
+	ev.listening(ln.Addr().(*net.TCPAddr).Port, secret, sp)
 
 	// The token comes first, and nothing connects before it.
 	in := bufio.NewReader(os.Stdin)
@@ -73,6 +86,11 @@ func main() {
 	}
 	up.start()
 	go f.serve(ln)
+	if socksLn != nil {
+		st := &stats{}
+		go st.run(ev, time.Second)
+		go newSocksServer(f, ev, st).serve(socksLn)
+	}
 	// Later lines replace the token for new streams. EOF: the app quit or
 	// crashed; exit at once (the OS closes every socket).
 	for readToken(in, f) {

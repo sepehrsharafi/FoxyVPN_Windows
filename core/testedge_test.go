@@ -64,10 +64,11 @@ type testEdge struct {
 	port     int
 	certFile string // PEM of the test root (the self-signed cert)
 
-	mu    sync.Mutex
-	conns []net.Conn
-	seen  []seenReq
-	total int // connections accepted
+	mu       sync.Mutex
+	conns    []net.Conn
+	seen     []seenReq
+	total    int               // connections accepted
+	backends map[string]string // CONNECT authority -> TCP address to relay to
 }
 
 const edgeName = "edge.test"
@@ -146,7 +147,7 @@ func (e *testEdge) handle(w http.ResponseWriter, r *http.Request) {
 	e.mu.Unlock()
 
 	switch {
-	case strings.HasPrefix(r.Host, "refuse.test"):
+	case strings.HasPrefix(r.Host, "refuse.test"), r.Header.Get(":protocol") != "" && strings.Contains(r.URL.Path, "/refuse.test/"):
 		w.Header().Set("Proxy-Status", "fastly; error=destination_unavailable")
 		w.WriteHeader(502)
 		return
@@ -154,8 +155,18 @@ func (e *testEdge) handle(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Fastly-Proxy-Auth-Failed", "1")
 		w.WriteHeader(400)
 		return
+	case strings.HasPrefix(r.Host, "broken.test"):
+		w.WriteHeader(500)
+		return
 	case strings.HasPrefix(r.Host, "hang.test"):
 		<-r.Context().Done()
+		return
+	}
+	e.mu.Lock()
+	backend := e.backends[r.Host]
+	e.mu.Unlock()
+	if backend != "" {
+		e.relay(w, r, backend)
 		return
 	}
 	w.WriteHeader(200)
@@ -266,6 +277,9 @@ func (l *lineSink) all() string {
 type engine struct {
 	t      *testing.T
 	f      *flows
+	ss     *socksServer
+	st     *stats
+	socks  int
 	up     *upstream
 	ev     *lineSink
 	port   int
@@ -283,9 +297,17 @@ func startEngine(t *testing.T, e *testEdge) *engine {
 	f := &flows{up: up, secret: "s3cret", serverAuthority: net.JoinHostPort(edgeName, strconv.Itoa(e.port))}
 	f.setToken("tok1")
 	go f.serve(ln)
+	st := &stats{}
+	ss := newSocksServer(f, up.ev, st)
+	sln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go ss.serve(sln)
+	go st.run(up.ev, 100*time.Millisecond)
 	up.start()
-	t.Cleanup(func() { ln.Close(); up.close() })
-	return &engine{t: t, f: f, up: up, ev: sink, port: ln.Addr().(*net.TCPAddr).Port, secret: "s3cret"}
+	t.Cleanup(func() { ln.Close(); sln.Close(); up.close() })
+	return &engine{t: t, f: f, up: up, ev: sink, ss: ss, st: st, socks: sln.Addr().(*net.TCPAddr).Port, port: ln.Addr().(*net.TCPAddr).Port, secret: "s3cret"}
 }
 
 // flow opens a loopback flow and returns the connection and the reply line.
@@ -304,4 +326,41 @@ func (g *engine) flow(kind, host, port string) (*net.TCPConn, *bufio.Reader, str
 		g.t.Fatalf("no reply line: %v", err)
 	}
 	return c.(*net.TCPConn), r, strings.TrimRight(line, "\n")
+}
+
+func (e *testEdge) setBackend(authority, addr string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.backends == nil {
+		e.backends = map[string]string{}
+	}
+	e.backends[authority] = addr
+}
+
+// relay connects the CONNECT stream to a real TCP server.
+func (e *testEdge) relay(w http.ResponseWriter, r *http.Request, addr string) {
+	bc, err := net.Dial("tcp", addr)
+	if err != nil {
+		w.WriteHeader(502)
+		return
+	}
+	defer bc.Close()
+	w.WriteHeader(200)
+	fl := w.(http.Flusher)
+	fl.Flush()
+	go func() {
+		io.Copy(bc, r.Body)
+		bc.(*net.TCPConn).CloseWrite()
+	}()
+	buf := make([]byte, 32<<10)
+	for {
+		n, err := bc.Read(buf)
+		if n > 0 {
+			w.Write(buf[:n])
+			fl.Flush()
+		}
+		if err != nil {
+			return
+		}
+	}
 }

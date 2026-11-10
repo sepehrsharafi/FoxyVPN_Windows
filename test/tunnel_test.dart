@@ -8,6 +8,7 @@ import 'package:foxyvpn/account.dart';
 import 'package:foxyvpn/guardian.dart';
 import 'package:foxyvpn/http_util.dart';
 import 'package:foxyvpn/servers.dart';
+import 'package:foxyvpn/tunnel/connector.dart' show defaultUpstreamConnector;
 import 'package:foxyvpn/tunnel/dns.dart';
 import 'package:foxyvpn/tunnel/loopback_bridge.dart';
 import 'package:foxyvpn/tunnel/socks_server.dart';
@@ -585,7 +586,7 @@ void main() {
       ControlPlane.resolver = (host) async => [InternetAddress.loopbackIPv4];
       await serve();
       VpnSession.connector =
-          (server, {required token, pinnedAddress, timeout = const Duration(seconds: 5)}) async {
+          (server, {required token, pinnedAddress, timeout = const Duration(seconds: 5), socksPort}) async {
             final socket = await Socket.connect(
               pinnedAddress ?? InternetAddress.loopbackIPv4,
               server.port,
@@ -603,7 +604,7 @@ void main() {
     tearDown(() async {
       ControlPlane.resolver = InternetAddress.lookup;
       ControlPlane.reset();
-      VpnSession.connector = UpstreamSession.connect;
+      VpnSession.connector = defaultUpstreamConnector;
       await edge.close();
       for (final s in accepted) {
         s.destroy();

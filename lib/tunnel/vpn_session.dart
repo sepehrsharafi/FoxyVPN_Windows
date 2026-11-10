@@ -7,7 +7,9 @@ import '../fxa.dart' show FxaError;
 import '../guardian.dart';
 import '../http_util.dart' show ControlPlane;
 import '../servers.dart';
+import '../platform/host.dart';
 import 'dns.dart';
+import 'engine.dart';
 import 'exit_check.dart';
 import 'socks_server.dart';
 import 'connector.dart';
@@ -33,6 +35,7 @@ typedef UpstreamConnector = Future<Upstream> Function(
   required String token,
   InternetAddress? pinnedAddress,
   Duration timeout,
+  int? socksPort,
 });
 
 /// A running connection: local SOCKS5 server + DoH resolver in front of one
@@ -40,6 +43,9 @@ typedef UpstreamConnector = Future<Upstream> Function(
 class VpnSession {
   /// How upstream connections are made; replaced in tests.
   static UpstreamConnector connector = defaultUpstreamConnector;
+
+  /// Whether the tunnel can use the engine's SOCKS server (Windows, Android; not macOS); replaced in tests.
+  static bool Function() engineSocksPlatform = () => Host.isWindows || Host.isAndroid;
 
   VpnSession._(this._account, this._log, this._beforeReconnect, this._directFallback);
 
@@ -54,6 +60,9 @@ class VpnSession {
   late final LocalSocksServer _socks;
 
   Upstream? _upstream;
+  /// Set when tun2socks talks to the engine's SOCKS server: its port (kept across engine restarts).
+  int? _engineSocksPort;
+  final _engines = <EngineUpstream>[];
   Completer<void>? _reconnected;
   Future<Upstream>? _rotating;
   final _drained = <Upstream>[];
@@ -93,7 +102,9 @@ class VpnSession {
     }
   }
 
-  int get socksPort => _socks.port;
+  /// Where tun2socks connects: the engine's SOCKS5 server on Windows when it runs one
+  /// (see [_engineSocksPort]), otherwise the Dart [LocalSocksServer].
+  int get socksPort => _engineSocksPort ?? _socks.port;
 
   InternetAddress get upstreamAddress => _pinned;
 
@@ -110,8 +121,11 @@ class VpnSession {
 
   String? get lastError => _lastError;
 
-  int get bytesUp => _socks.bytesUp;
-  int get bytesDown => _socks.bytesDown;
+  /// Payload bytes moved: the Dart SOCKS server's, plus (engine SOCKS mode) every
+  /// engine this session has run. Dead engines keep their last count, so the
+  /// total never goes backwards when an engine restarts.
+  int get bytesUp => _socks.bytesUp + _engines.fold(0, (a, e) => a + e.bytesUp);
+  int get bytesDown => _socks.bytesDown + _engines.fold(0, (a, e) => a + e.bytesDown);
 
   /// Estimated from the last proxy pass minus what this session has moved since.
   int? get quotaRemaining {
@@ -182,6 +196,10 @@ class VpnSession {
       );
     }
     _pinned = upstream.address;
+    // Windows and Android: the tunnel talks to the engine's own SOCKS5 server, not to Dart.
+    if (engineSocksPlatform() && !_directFallback && upstream is EngineUpstream && upstream.socksPort != null) {
+      _engineSocksPort = upstream.socksPort;
+    }
     _adopt(upstream);
     // Resolve the control-plane hosts now: once the VPN routes are up, the
     // app's own HTTPS must bypass the tunnel using these addresses. The relay's
@@ -202,6 +220,16 @@ class VpnSession {
 
   void _adopt(Upstream upstream) {
     _upstream = upstream;
+    if (_engineSocksPort != null && upstream is EngineUpstream) {
+      _engines.add(upstream);
+      // The engine saw the edge reject the token: renew the pass (which sends
+      // the engine the new token). Coalesced with any renewal already running.
+      upstream.onAuthFailed = () => unawaited(_renewPass());
+      final port = upstream.socksPort;
+      if (port != _engineSocksPort) {
+        _log?.call('Engine SOCKS port changed ($_engineSocksPort -> $port); the tunnel still uses $_engineSocksPort');
+      }
+    }
     upstream.done.then((_) {
       if (identical(_upstream, upstream)) _reconnect();
     });
@@ -347,7 +375,7 @@ class VpnSession {
 
   Future<Upstream> _doRotate(Upstream old) async {
     _log?.call('Upstream is draining (GOAWAY), opening a fresh connection');
-    final fresh = await connector(_node, token: _token, pinnedAddress: _pinned, timeout: _connectTimeout);
+    final fresh = await _connectAgain();
     if (_stopped || !identical(_upstream, old)) {
       await fresh.close();
       throw const SocketException('Upstream connection changed while rotating.');
@@ -357,6 +385,24 @@ class VpnSession {
     old.closeWhenIdle();
     old.done.then((_) => _drained.remove(old));
     return fresh;
+  }
+
+  /// A new upstream to the pinned IP. In engine SOCKS mode the engine must use the
+  /// port tun2socks was started with, and a non-engine upstream is no use (tun2socks
+  /// would talk to a port nobody serves), so that counts as a failed attempt.
+  Future<Upstream> _connectAgain() async {
+    final upstream = await connector(
+      _node,
+      token: _token,
+      pinnedAddress: _pinned,
+      timeout: _connectTimeout,
+      socksPort: _engineSocksPort,
+    );
+    if (_engineSocksPort != null && upstream is! EngineUpstream) {
+      await upstream.close();
+      throw const SocketException('foxy-core did not start');
+    }
+    return upstream;
   }
 
   void _reconnect() {
@@ -384,7 +430,7 @@ class VpnSession {
           }
           if (_stopped) break;
         }
-        final upstream = await connector(_node, token: _token, pinnedAddress: _pinned, timeout: _connectTimeout);
+        final upstream = await _connectAgain();
         if (_stopped) {
           await upstream.close();
           break;

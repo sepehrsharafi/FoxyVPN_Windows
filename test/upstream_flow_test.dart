@@ -8,6 +8,7 @@ import 'package:foxyvpn/account.dart';
 import 'package:foxyvpn/guardian.dart';
 import 'package:foxyvpn/http_util.dart';
 import 'package:foxyvpn/servers.dart';
+import 'package:foxyvpn/tunnel/connector.dart' show defaultUpstreamConnector;
 import 'package:foxyvpn/tunnel/upstream.dart';
 import 'package:foxyvpn/tunnel/vpn_session.dart';
 import 'package:http2/http2.dart';
@@ -515,6 +516,7 @@ void main() {
       ServerNode server, {
       required String token,
       InternetAddress? pinnedAddress,
+      int? socksPort,
       Duration timeout = const Duration(seconds: 5),
     }) async {
       final socket = await Socket.connect(
@@ -553,7 +555,7 @@ void main() {
     tearDown(() async {
       ControlPlane.resolver = InternetAddress.lookup;
       ControlPlane.reset();
-      VpnSession.connector = UpstreamSession.connect;
+      VpnSession.connector = defaultUpstreamConnector;
       await edge.close();
     });
 

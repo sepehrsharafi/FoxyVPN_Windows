@@ -73,9 +73,9 @@ func (f *flows) handle(c net.Conn) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	resp, pw, errLine := f.open(ctx, cancel, kind, host, port)
-	if errLine != "" {
-		writeLine(c, errLine)
+	resp, pw, oe := f.openStream(ctx, cancel, kind, host, port)
+	if oe != nil {
+		writeLine(c, oe.line())
 		return
 	}
 	defer resp.Body.Close()
@@ -83,19 +83,58 @@ func (f *flows) handle(c net.Conn) {
 		pw.CloseWithError(io.ErrClosedPipe)
 		return
 	}
-	bridge(c, r, resp.Body, pw, cancel)
+	bridge(c, r, resp.Body, pw, cancel, nil, nil)
+}
+
+// Copy buffers: upload is bounded by the HTTP/2 frame size on the other end
+// of the pipe, download by what the stream has buffered. Pooled, so a flow
+// costs no allocation.
+const (
+	upBufSize   = 64 << 10
+	downBufSize = 128 << 10
+)
+
+var (
+	upBufs   = sync.Pool{New: func() any { b := make([]byte, upBufSize); return &b }}
+	downBufs = sync.Pool{New: func() any { b := make([]byte, downBufSize); return &b }}
+)
+
+// copyCount copies src to dst through buf and adds the bytes written to ctr
+// (may be nil). A clean end of src is nil.
+func copyCount(dst io.Writer, src io.Reader, buf []byte, ctr *atomic.Int64) error {
+	for {
+		n, rerr := src.Read(buf)
+		if n > 0 {
+			w, werr := dst.Write(buf[:n])
+			if ctr != nil && w > 0 {
+				ctr.Add(int64(w))
+			}
+			if werr != nil {
+				return werr
+			}
+		}
+		if rerr != nil {
+			if rerr == io.EOF {
+				return nil
+			}
+			return rerr
+		}
+	}
 }
 
 // bridge copies both ways. Client EOF ends the request body (END_STREAM)
 // while the response keeps flowing; response EOF becomes a half-close of the
 // client socket. A failure on either side cancels the stream, which makes
-// x/net send RST_STREAM (in the right order, after HEADERS).
-func bridge(c net.Conn, in io.Reader, body io.Reader, pw *io.PipeWriter, cancel context.CancelFunc) {
+// x/net send RST_STREAM (in the right order, after HEADERS). up and down
+// (may be nil) count the payload bytes moved.
+func bridge(c net.Conn, in io.Reader, body io.Reader, pw *io.PipeWriter, cancel context.CancelFunc, up, down *atomic.Int64) {
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_, err := io.Copy(pw, in)
+		bp := upBufs.Get().(*[]byte)
+		err := copyCount(pw, in, *bp, up)
+		upBufs.Put(bp)
 		if err == nil {
 			pw.Close() // client EOF: our half-close
 			return
@@ -106,7 +145,9 @@ func bridge(c net.Conn, in io.Reader, body io.Reader, pw *io.PipeWriter, cancel 
 		}
 	}()
 
-	_, err := io.Copy(c, body)
+	bp := downBufs.Get().(*[]byte)
+	err := copyCount(c, body, *bp, down)
+	downBufs.Put(bp)
 	// The stream is over: end it.
 	cancel()
 	pw.CloseWithError(io.ErrClosedPipe)
@@ -138,12 +179,32 @@ func (b *trackBody) Read(p []byte) (int, error) {
 	return b.ReadCloser.Read(p)
 }
 
-// open sends the CONNECT / CONNECT-UDP request and returns the 2xx response
-// plus the writer for the request body. On failure it returns the ERR line.
-func (f *flows) open(ctx context.Context, cancel context.CancelFunc, kind, host string, port int) (*http.Response, *io.PipeWriter, string) {
+// openError is why a stream could not be opened. status is the edge's HTTP
+// status (407 when it sent x-fastly-proxy-auth-failed), or 0 for engine and
+// transport errors.
+type openError struct {
+	status      int
+	proxyStatus string // "-" when none; spaces replaced by "_"
+	msg         string
+}
+
+func (e *openError) line() string {
+	return fmt.Sprintf("ERR %d %s %s", e.status, e.proxyStatus, e.msg)
+}
+
+// authProblem: the edge did not accept our token.
+func (e *openError) authProblem() bool {
+	return e.status == 401 || e.status == 403 || e.status == 407
+}
+
+// openStream sends the CONNECT / CONNECT-UDP request and returns the 2xx
+// response plus the writer for the request body. Shared by the line
+// protocol, the SOCKS server and the DoH client. Cancelling ctx ends the
+// stream.
+func (f *flows) openStream(ctx context.Context, cancel context.CancelFunc, kind, host string, port int) (*http.Response, *io.PipeWriter, *openError) {
 	tokp := f.token.Load()
 	if tokp == nil || *tokp == "" {
-		return nil, nil, "ERR 0 - no token"
+		return nil, nil, &openError{0, "-", "no token"}
 	}
 	auth := "Bearer " + *tokp
 
@@ -154,7 +215,7 @@ func (f *flows) open(ctx context.Context, cancel context.CancelFunc, kind, host 
 	for attempt := 1; ; attempt++ {
 		pc, err := f.up.get(ctx)
 		if err != nil {
-			return nil, nil, errLine(err, timedOut.Load())
+			return nil, nil, errOf(err, timedOut.Load())
 		}
 		pr, pw := io.Pipe()
 		body := &trackBody{ReadCloser: pr}
@@ -165,7 +226,7 @@ func (f *flows) open(ctx context.Context, cancel context.CancelFunc, kind, host 
 			if attempt < maxAttempts && !body.started.Load() && retryable(err) && ctx.Err() == nil {
 				continue
 			}
-			return nil, nil, errLine(err, timedOut.Load())
+			return nil, nil, errOf(err, timedOut.Load())
 		}
 		if resp.StatusCode/100 != 2 {
 			defer resp.Body.Close()
@@ -183,9 +244,9 @@ func (f *flows) open(ctx context.Context, cancel context.CancelFunc, kind, host 
 			if msg == "" {
 				msg = "HTTP " + strconv.Itoa(resp.StatusCode)
 			}
-			return nil, nil, fmt.Sprintf("ERR %d %s %s", status, ps, msg)
+			return nil, nil, &openError{status, ps, msg}
 		}
-		return resp, pw, ""
+		return resp, pw, nil
 	}
 }
 
@@ -248,15 +309,15 @@ func retryable(err error) bool {
 		strings.Contains(s, "client conn could not be established")
 }
 
-func errLine(err error, timedOut bool) string {
+func errOf(err error, timedOut bool) *openError {
 	if timedOut || errors.Is(err, context.DeadlineExceeded) {
-		return "ERR 0 - timeout"
+		return &openError{0, "-", "timeout"}
 	}
 	msg := strings.Join(strings.Fields(err.Error()), " ")
 	if len(msg) > 200 {
 		msg = msg[:200]
 	}
-	return "ERR 0 - " + msg
+	return &openError{0, "-", msg}
 }
 
 func writeLine(c net.Conn, s string) bool {

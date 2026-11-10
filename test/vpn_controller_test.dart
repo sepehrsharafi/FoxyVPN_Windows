@@ -91,7 +91,7 @@ class _FakeSession implements VpnSession {
       'fl=1\nip=198.51.100.7\nloc=AT\n';
 
   @override
-  Future<String> httpsGetThroughTunnel(String host, String path, {Duration timeout = const Duration(seconds: 10)}) {
+  Future<String> httpsGetThroughTunnel(String host, String path, {Duration timeout = const Duration(seconds: 10), socksPort}) {
     traceCalls++;
     return trace(host, path, timeout);
   }
@@ -145,7 +145,7 @@ Location loc(String country, String city) => Location(
 
 /// An upstream connector that always fails, after [delay].
 UpstreamConnector failingConnector({Duration delay = Duration.zero}) =>
-    (server, {required token, pinnedAddress, timeout = const Duration(seconds: 10)}) =>
+    (server, {required token, pinnedAddress, timeout = const Duration(seconds: 10), socksPort}) =>
         Future.delayed(delay, () => throw const SocketException('refused'));
 
 void main() {
@@ -291,7 +291,7 @@ void main() {
 
   test('selecting another location while connecting cancels that connect and starts a new one', () async {
     final attempted = <String>[];
-    VpnSession.connector = (server, {required token, pinnedAddress, timeout = const Duration(seconds: 10)}) {
+    VpnSession.connector = (server, {required token, pinnedAddress, timeout = const Duration(seconds: 10), socksPort}) {
       attempted.add(server.host);
       return Future.delayed(const Duration(milliseconds: 30), () => throw const SocketException('refused'));
     };
