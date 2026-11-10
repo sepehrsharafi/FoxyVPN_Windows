@@ -57,6 +57,10 @@ Changes (all marked `PATCH(foxyvpn)`):
    is the whole window and goes out. The peer always has at least 3/4 of the
    window to send into. Works with (3) and (5): credit is still counted on
    receipt for the connection, and an increment is never 0.
+10. `lib/transport.dart` + `lib/src/connection.dart`: new
+   `ClientTransportConnection.terminationReason` (error code and message of
+   the termination, or "transport closed"), so the app can log why a
+   connection ended.
 
 Measured with a loopback benchmark (SOCKS server + `UpstreamSession` against a
 local HTTP/2 edge, plaintext, AOT, 8 flows x 128 MB; CPU of the app process

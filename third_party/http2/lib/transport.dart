@@ -102,6 +102,10 @@ abstract class ClientTransportConnection extends TransportConnection {
   /// [isOpen], which is also false while the concurrent-stream limit is hit).
   bool get isDraining;
 
+  /// PATCH(foxyvpn): why the connection was terminated (error code and
+  /// message, or "transport closed"); null while it is not terminated.
+  String? get terminationReason;
+
   /// The maximum number of concurrent streams the peer currently allows, per
   /// its most recent SETTINGS_MAX_CONCURRENT_STREAMS (RFC 7540 6.5.2), or
   /// `null` if the peer hasn't advertised a limit.

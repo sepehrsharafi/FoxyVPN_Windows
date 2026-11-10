@@ -152,6 +152,9 @@ abstract class Connection {
   /// The state of this connection.
   late ConnectionState _state;
 
+  // PATCH(foxyvpn): see PATCHES.md (10).
+  String? terminationReason;
+
   Connection(
     Stream<List<int>> incoming,
     StreamSink<List<int>> outgoing,
@@ -466,6 +469,10 @@ abstract class Connection {
     // TODO: When do we complete here?
     if (_state.state != ConnectionState.Terminated) {
       _state.state = ConnectionState.Terminated;
+      // PATCH(foxyvpn): see PATCHES.md (10).
+      terminationReason = causedByTransportError
+          ? 'transport closed'
+          : 'error code $errorCode${message != null ? ': $message' : ''}';
 
       var cancelFuture = Future.sync(_frameReaderSubscription.cancel);
       if (!causedByTransportError) {

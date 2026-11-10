@@ -329,10 +329,11 @@ class VpnSession {
   void _reconnect() {
     if (_stopped || _reconnected != null) return;
     final attempt = _reconnected = Completer<void>();
+    final reason = _upstream?.deathReason;
     _upstream?.close();
     _upstream = null;
     _setPhase(VpnPhase.reconnecting);
-    _log?.call('Connection to upstream lost, reconnecting');
+    _log?.call('Connection to upstream lost${reason == null ? '' : ' ($reason)'}, reconnecting');
     unawaited(_reconnectLoop(attempt));
   }
 

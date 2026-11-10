@@ -77,12 +77,16 @@ class UpstreamSession {
     _token = token;
     final incoming = socket.transform(
       StreamTransformer<Uint8List, List<int>>.fromHandlers(
+        handleData: (data, sink) {
+          _lastReceived = _clock.elapsed;
+          sink.add(data);
+        },
         handleError: (e, st, sink) {
-          _dead = true;
+          _markDead('socket error: $e');
           sink.addError(e, st);
         },
         handleDone: (sink) {
-          _dead = true;
+          _markDead('the server closed the connection');
           sink.close();
           close();
         },
@@ -158,6 +162,18 @@ class UpstreamSession {
   bool _closed = false;
   bool _dead = false;
   int _activeStreams = 0;
+  bool _pinging = false;
+  final _clock = Stopwatch()..start();
+  Duration _lastReceived = Duration.zero; // on [_clock]
+  String? _deathReason;
+
+  /// Why the connection ended (for the log); null while it is alive.
+  String? get deathReason => _deathReason ?? _conn.terminationReason;
+
+  void _markDead(String reason) {
+    _dead = true;
+    _deathReason ??= reason;
+  }
 
   /// The connection itself is usable. Unlike the HTTP/2 library's `isOpen`
   /// this stays true while the peer's concurrent-stream limit is reached.
@@ -336,12 +352,32 @@ class UpstreamSession {
     _socket.destroy();
   }
 
+  /// Closes the connection only when it has gone silent. On a busy, slow link
+  /// the PING ACK can queue behind megabytes of DATA (the receive windows are
+  /// large), so a late ACK while bytes keep arriving is not a dead connection;
+  /// closing it then would reset every flow it carries.
   Future<void> _keepAlive() async {
     if (!alive) return close();
+    if (_pinging) return; // the previous ping is still waiting for its ACK
+    _pinging = true;
     try {
-      await _conn.ping().timeout(_pingTimeout);
-    } catch (_) {
+      while (alive) {
+        final sentAt = _clock.elapsed;
+        try {
+          await _conn.ping().timeout(_pingTimeout);
+          return;
+        } on TimeoutException {
+          if (_lastReceived > sentAt) continue; // still receiving: keep waiting
+          _markDead('no reply from the server for ${_pingTimeout.inSeconds} s');
+          await close();
+          return;
+        }
+      }
+    } catch (e) {
+      _markDead('keep-alive failed: $e');
       await close();
+    } finally {
+      _pinging = false;
     }
   }
 }
