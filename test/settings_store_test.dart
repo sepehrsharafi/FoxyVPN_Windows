@@ -110,4 +110,12 @@ void main() {
     expect(() => store.setEmail('me@example.com'), returnsNormally);
     expect(store.email, 'me@example.com'); // still kept in memory
   });
+
+  test('the relay URL round-trips, is trimmed, and empty clears it', () {
+    expect(SettingsStore(file).relayUrl, isNull);
+    SettingsStore(file).setRelayUrl('  https://foxy.example.workers.dev/?secret=s ');
+    expect(SettingsStore(file).relayUrl, 'https://foxy.example.workers.dev/?secret=s');
+    SettingsStore(file).setRelayUrl('');
+    expect(SettingsStore(file).relayUrl, isNull);
+  });
 }

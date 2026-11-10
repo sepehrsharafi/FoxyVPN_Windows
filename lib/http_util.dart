@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'app_log.dart';
 import 'control_h2.dart';
+import 'control_relay.dart';
 import 'edge_challenge.dart';
 import 'servers.dart' show mozillaVpnUserAgent;
 
@@ -91,6 +92,7 @@ class ControlPlane {
   }
 
   static void reset() {
+    ControlRelay.reset();
     sourceAddress = null;
     pinned.clear();
     closeH2Connections();
@@ -107,8 +109,10 @@ class ControlPlane {
       try {
         socket.setOption(SocketOption.tcpNoDelay, true);
         if (uri.scheme != 'https') return socket;
+        // A handshake that stalls is a connect failure (nothing was sent yet), not a
+        // TimeoutException, which callers read as "the request may have been applied".
         return await SecureSocket.secure(socket, host: host, supportedProtocols: alpn, context: securityContext)
-            .timeout(timeout);
+            .timeout(timeout, onTimeout: () => throw SocketException('TLS handshake with $host timed out'));
       } catch (_) {
         socket.destroy();
         rethrow;
@@ -118,7 +122,8 @@ class ControlPlane {
     if (source == null) return ready(await Socket.connect(host, port, timeout: timeout));
     var candidates = [...?pinned[host]].where((a) => a.type == source.type).toList();
     if (candidates.isEmpty) {
-      final found = await InternetAddress.lookup(host, type: source.type).timeout(timeout);
+      final found = await InternetAddress.lookup(host, type: source.type)
+          .timeout(timeout, onTimeout: () => throw SocketException('Looking up $host timed out'));
       candidates = found.where((a) => a.type == source.type).toList();
     }
     Object? lastError;
@@ -347,14 +352,85 @@ Future<JsonResponse> _send(String method, Uri uri,
     // The raw type, so nothing appends "; charset=utf-8" (Hawk signs the exact type).
     if (body != null) 'content-type': 'application/json',
   };
-  final JsonResponse response;
-  if (await sendH2(method, uri, requestHeaders, body) case final h2?) {
-    response = h2;
-  } else {
-    response = await _sendH1(method, uri, requestHeaders, body);
+  // Cookies belong to the target, whichever way the response came.
+  var fallbackRelay = ControlRelay.active;
+  JsonResponse? response;
+  if (fallbackRelay != null && ControlRelay.relayFirst) {
+    response = await _viaRelay(fallbackRelay, method, uri, requestHeaders, body, rethrowTimeout: true);
+    if (response == null) {
+      ControlRelay.endRelayFirst();
+      fallbackRelay = null; // it just failed; do not try it again for this request
+    }
   }
+  response ??= await _directOrRelay(fallbackRelay, method, uri, requestHeaders, body);
   if (response.headers['set-cookie'] case final setCookies?) cookies.store(uri, setCookies);
   return response;
+}
+
+/// Mozilla's edge in some regions answers 451 to this host's API paths but lets
+/// the same request through with one more leading slash.
+const _guardianHost = 'vpn.mozilla.org';
+
+/// Direct first; HTTP 451 (after the doubled-slash retry) or a failure to connect
+/// goes through [relay] when there is one. A reply from the relay only counts when
+/// it carries the Worker's marker; otherwise the direct answer or error stands.
+Future<JsonResponse> _directOrRelay(
+    Uri? relay, String method, Uri uri, Map<String, String> headers, List<int>? body) async {
+  final JsonResponse direct;
+  try {
+    direct = await _directWithSlashRetry(method, uri, headers, body);
+  } on SocketException {
+    final viaRelay = relay == null ? null : await _viaRelay(relay, method, uri, headers, body);
+    if (viaRelay != null) return viaRelay;
+    rethrow;
+  } on TlsException {
+    final viaRelay = relay == null ? null : await _viaRelay(relay, method, uri, headers, body);
+    if (viaRelay != null) return viaRelay;
+    rethrow;
+  }
+  if (direct.statusCode != 451 || relay == null) return direct;
+  return await _viaRelay(relay, method, uri, headers, body) ?? direct;
+}
+
+Future<JsonResponse> _directWithSlashRetry(
+    String method, Uri uri, Map<String, String> headers, List<int>? body) async {
+  final response = await _sendDirect(method, uri, headers, body);
+  if (response.statusCode != 451 || uri.host != _guardianHost || uri.path.startsWith('//')) return response;
+  AppLog.write('HTTP 451 from $method ${uri.host}${uri.path}; retrying with a doubled leading slash');
+  final retried = await _sendDirect(method, uri.replace(path: '/${uri.path}'), headers, body);
+  return retried.statusCode == 451 ? response : retried;
+}
+
+Future<JsonResponse> _sendDirect(String method, Uri uri, Map<String, String> headers, List<int>? body) async {
+  if (await sendH2(method, uri, headers, body) case final h2?) return h2;
+  return _sendH1(method, uri, headers, body);
+}
+
+/// The reply of Mozilla through [relay], or null when the relay did not get the
+/// request to Mozilla (it failed, or Cloudflare answered instead of the Worker).
+/// A timeout may mean the request was applied, so with [rethrowTimeout] (no direct
+/// attempt can follow safely) it is not swallowed.
+Future<JsonResponse?> _viaRelay(Uri relay, String method, Uri target, Map<String, String> headers, List<int>? body,
+    {bool rethrowTimeout = false}) async {
+  final name = ControlRelay.logName(relay);
+  try {
+    final response = await _sendDirect(method, ControlRelay.forTarget(relay, target), headers, body);
+    if (ControlRelay.markerHeaders.any((header) => response.headers.value(header) != null)) {
+      AppLog.write('Sent $method ${target.host}${target.path} through the relay $name');
+      ControlRelay.relayWorked(relay);
+      return response;
+    }
+    AppLog.write('The relay $name answered HTTP ${response.statusCode} without reaching Mozilla');
+  } on TimeoutException {
+    AppLog.write('The relay $name timed out');
+    if (rethrowTimeout) {
+      ControlRelay.endRelayFirst();
+      rethrow;
+    }
+  } catch (e) {
+    AppLog.write('The relay $name failed: ${e.runtimeType}');
+  }
+  return null;
 }
 
 /// HTTP/1.1, one connection per request: plain http (tests) and hosts that did

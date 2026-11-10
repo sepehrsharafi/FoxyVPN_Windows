@@ -14,6 +14,7 @@ import 'package:flutter/foundation.dart';
 
 import 'account.dart';
 import 'app_log.dart';
+import 'control_relay.dart';
 import 'errors.dart';
 import 'fxa.dart' show LoginDone, LoginNeedsCode, LoginStep;
 import 'guardian.dart' show QuotaExceeded;
@@ -98,6 +99,7 @@ class VpnController extends ChangeNotifier {
        _android = androidBridge ?? (Host.isAndroid ? AndroidBridge.instance : null) {
     _signedIn = _account.hasSavedSignIn;
     _selectedKey = _settings.selectedLocation;
+    ControlRelay.userUrl = _settings.relayUrl ?? '';
   }
 
   static TunBackendStarter? _wrapWindows(TunStarter? start) {
@@ -519,6 +521,28 @@ class VpnController extends ChangeNotifier {
   Future<void> setDirectFallback(bool value) async {
     _settings.setDirectFallback(value);
     _notify();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Relay server
+  // ---------------------------------------------------------------------------
+
+  /// The user's relay URL ('' for none, so the built-in one is used).
+  String get relayUrl => _settings.relayUrl ?? '';
+
+  /// Whether the app was built with a relay of its own.
+  bool get hasBuiltInRelay => ControlRelay.hasBuiltIn;
+
+  /// Saves [value] as the relay ('' goes back to the built-in one) and uses it from
+  /// the next request on. Returns false, saving nothing, when it is not an https URL.
+  bool setRelayUrl(String value) {
+    final text = value.trim();
+    if (text.isNotEmpty && ControlRelay.parse(text) == null) return false;
+    _settings.setRelayUrl(text);
+    ControlRelay.userUrl = text;
+    ControlRelay.reset();
+    _notify();
+    return true;
   }
 
   // ---------------------------------------------------------------------------

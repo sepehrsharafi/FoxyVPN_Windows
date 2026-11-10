@@ -1,7 +1,7 @@
 // Small, non-secret app settings in %APPDATA%\FoxyVPN\settings.json (Android:
 // settings.json in the app's private files directory): the email the user
 // signed in with (shown in the UI), the selected location, the
-// direct-fallback switch and (Windows) the tray settings.
+// direct-fallback switch, the user's relay server URL and (Windows) the tray settings.
 // Never holds tokens (those are in token_store.dart, encrypted).
 
 import 'dart:convert';
@@ -41,6 +41,12 @@ class SettingsStore {
     }
     _write();
   }
+
+  /// The user's own relay server (a Cloudflare Worker URL with its secret), or
+  /// null to use the one built into the app, if any. Not a token of an account.
+  String? get relayUrl => _string('relayUrl');
+
+  void setRelayUrl(String? value) => _set('relayUrl', value?.trim());
 
   /// Desktop: closing the window keeps FoxyVPN running in the notification
   /// area / menu bar (the VPN stays up). On unless the user switched it off.

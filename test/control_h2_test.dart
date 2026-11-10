@@ -116,6 +116,12 @@ void main() {
       expect(seen[1], containsPair('cookie', 'edge=ok'), reason: 'the cookie from the first answer comes back');
     });
 
+    test('a doubled leading slash reaches the server unchanged as :path', () async {
+      final response = await sendH2('GET', at('//api/v1/fpn/token'), {'user-agent': 'x'}, null);
+      expect(response!.statusCode, 200);
+      expect(seen.single[':path'], '//api/v1/fpn/token');
+    });
+
     test('a gzip answer is unpacked; a POST without a body still says content-length 0', () async {
       final zipped = await sendJson('POST', at('/gzip'), body: utf8.encode('{"z":1}'));
       expect(jsonDecode(zipped.body), {'echo': '{"z":1}'});

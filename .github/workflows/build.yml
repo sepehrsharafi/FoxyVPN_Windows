@@ -51,7 +51,11 @@ jobs:
 
       - run: flutter pub get
       - run: flutter test
-      - run: flutter build windows --release
+      - name: Build the app
+        shell: bash
+        env:
+          FOXY_RELAY_URL: ${{ secrets.FOXY_RELAY_URL }}
+        run: flutter build windows --release --dart-define=FOXY_RELAY_URL="$FOXY_RELAY_URL"
 
       - name: Add tun2socks and Wintun next to foxyvpn.exe
         shell: pwsh
@@ -312,7 +316,11 @@ jobs:
             echo "keyPassword=$KEY_PASSWORD"
           } > android/key.properties
 
-      - run: flutter build apk --release
+      - name: Build the app
+        shell: bash
+        env:
+          FOXY_RELAY_URL: ${{ secrets.FOXY_RELAY_URL }}
+        run: flutter build apk --release --dart-define=FOXY_RELAY_URL="$FOXY_RELAY_URL"
 
       - name: Collect the download
         run: |
@@ -349,9 +357,11 @@ jobs:
 
       - name: Build the app
         shell: bash
+        env:
+          FOXY_RELAY_URL: ${{ secrets.FOXY_RELAY_URL }}
         run: |
           set -euo pipefail
-          flutter build macos --release
+          flutter build macos --release --dart-define=FOXY_RELAY_URL="$FOXY_RELAY_URL"
           APP="$PWD/build/macos/Build/Products/Release/FoxyVPN.app"
           if [ ! -x "$APP/Contents/MacOS/FoxyVPN" ]; then
             echo "::error::FoxyVPN.app was not produced at $APP"

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import '../account.dart';
+import '../control_relay.dart';
 import '../fxa.dart' show FxaError;
 import '../guardian.dart';
 import '../http_util.dart' show ControlPlane;
@@ -179,8 +180,9 @@ class VpnSession {
     _pinned = upstream.address;
     _adopt(upstream);
     // Resolve the control-plane hosts now: once the VPN routes are up, the
-    // app's own HTTPS must bypass the tunnel using these addresses.
-    await ControlPlane.pin(const ['vpn.mozilla.org', 'api.accounts.firefox.com']);
+    // app's own HTTPS must bypass the tunnel using these addresses. The relay's
+    // host too, so pass renewal can go through it while connected.
+    await ControlPlane.pin(['vpn.mozilla.org', 'api.accounts.firefox.com', ?ControlRelay.host]);
 
     _dns = DnsResolver(_dial);
     _socks = await LocalSocksServer.start(

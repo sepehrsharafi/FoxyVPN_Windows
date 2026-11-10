@@ -7,7 +7,9 @@ import '../../format.dart';
 import '../../platform/host.dart';
 import '../../vpn_controller.dart';
 import '../theme.dart';
+import '../widgets/app_button.dart';
 import '../widgets/app_card.dart';
+import '../widgets/foxy_text_field.dart';
 import '../widgets/foxy_icon.dart';
 import '../widgets/foxy_route.dart';
 import '../widgets/foxy_switch.dart';
@@ -29,6 +31,9 @@ class AccountScreen extends StatefulWidget {
 
 class _AccountScreenState extends State<AccountScreen> {
   final _push = PushGuard();
+
+  /// The relay card is folded away unless the user opens it (it is rarely needed).
+  late bool _relayOpen = controller.relayUrl.isNotEmpty;
 
   VpnController get controller => widget.controller;
 
@@ -134,16 +139,42 @@ class _AccountScreenState extends State<AccountScreen> {
                                     ],
                                   ),
                                 ),
+                                if (_relayOpen) ...[
+                                  const SizedBox(height: 12),
+                                  _RelayCard(
+                                    current: controller.relayUrl,
+                                    hasBuiltIn: controller.hasBuiltInRelay,
+                                    onSave: controller.setRelayUrl,
+                                  ),
+                                ],
                                 // Sign out and Version sit at the bottom; the gap above is
                                 // whatever is left (at least 8) so the page fits where it can.
                                 const Spacer(),
                                 const SizedBox(height: 8),
                                 _SignOutRow(enabled: idle, onTap: _signOut),
                                 const SizedBox(height: 16),
-                                Text(
-                                  'Version $kAppVersion',
-                                  textAlign: TextAlign.center,
-                                  style: FoxyText.caption.copyWith(color: FoxyColors.textFaint),
+                                Row(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    Text(
+                                      'Version $kAppVersion',
+                                      textAlign: TextAlign.center,
+                                      style: FoxyText.caption.copyWith(color: FoxyColors.textFaint),
+                                    ),
+                                    const SizedBox(width: 16),
+                                    // Rarely needed, so a quiet link instead of a row of its own.
+                                    Pressable(
+                                      onTap: () => setState(() => _relayOpen = !_relayOpen),
+                                      semanticLabel: 'Relay server',
+                                      builder: (context, s) => Text(
+                                        'Relay server',
+                                        style: FoxyText.caption.copyWith(
+                                          color: s.hovered ? FoxyColors.text : FoxyColors.textDim,
+                                          decoration: TextDecoration.underline,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
                                 ),
                               ],
                             ),
@@ -427,6 +458,82 @@ class _DirectFallbackCard extends StatelessWidget {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// The relay server (a Cloudflare Worker) the app's own requests use when Mozilla
+/// refuses the user's region. Empty means the one built into the app, if any.
+class _RelayCard extends StatefulWidget {
+  const _RelayCard({required this.current, required this.hasBuiltIn, required this.onSave});
+
+  final String current;
+  final bool hasBuiltIn;
+
+  /// Returns false when the text is not an https URL (nothing is saved then).
+  final bool Function(String value) onSave;
+
+  @override
+  State<_RelayCard> createState() => _RelayCardState();
+}
+
+class _RelayCardState extends State<_RelayCard> {
+  late final _text = TextEditingController(text: widget.current);
+  String? _note;
+  bool _error = false;
+
+  @override
+  void dispose() {
+    _text.dispose();
+    super.dispose();
+  }
+
+  void _save() {
+    final ok = widget.onSave(_text.text);
+    setState(() {
+      _error = !ok;
+      _note = ok ? 'Saved.' : 'The relay address must start with https://';
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final builtInLine = _text.text.trim().isNotEmpty
+        ? null
+        : widget.hasBuiltIn
+        ? 'Empty: using the relay built into this app.'
+        : 'Empty: no relay is built into this app.';
+    return AppCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text('Relay server (if Mozilla refuses your region)', style: FoxyText.label),
+          const SizedBox(height: 6),
+          Text(
+            'Paste the address of your relay (a Cloudflare Worker). Requests Mozilla refuses are sent through it.',
+            style: FoxyText.caption.copyWith(height: 1.45),
+          ),
+          const SizedBox(height: 12),
+          FoxyTextField(
+            controller: _text,
+            hint: 'https://foxy.example.workers.dev/?secret=...',
+            keyboardType: TextInputType.url,
+            onChanged: (_) => setState(() => _note = null),
+            onSubmitted: (_) => _save(),
+          ),
+          if (builtInLine != null) ...[
+            const SizedBox(height: 8),
+            Text(builtInLine, style: FoxyText.caption),
+          ],
+          if (_note != null) ...[
+            const SizedBox(height: 8),
+            Text(_note!, style: FoxyText.caption.copyWith(color: _error ? FoxyColors.danger : FoxyColors.text)),
+          ],
+          const SizedBox(height: 12),
+          AppButton(label: 'Save', kind: AppButtonKind.secondary, onPressed: _save),
+        ],
       ),
     );
   }

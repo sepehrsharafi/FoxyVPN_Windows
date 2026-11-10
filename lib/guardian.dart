@@ -4,6 +4,7 @@
 
 import 'dart:convert';
 
+import 'control_relay.dart';
 import 'http_util.dart';
 
 const _guardianEndpoint = 'https://vpn.mozilla.org';
@@ -53,6 +54,11 @@ DateTime? parseQuotaReset(String? value, {DateTime? now}) {
 }
 
 class GuardianClient {
+  /// [endpoint] only differs in tests.
+  GuardianClient({this.endpoint = _guardianEndpoint});
+
+  final String endpoint;
+
   /// Gets a proxy pass, activating the free VPN entitlement first if needed.
   Future<ProxyPass> proxyPass(String accessToken) async {
     try {
@@ -84,7 +90,7 @@ class GuardianClient {
   Future<JsonResponse> _request(String method, String path, String accessToken) async {
     final response = await sendJson(
       method,
-      Uri.parse('$_guardianEndpoint$path'),
+      Uri.parse('$endpoint$path'),
       body: method == 'POST' ? const [] : null,
       headers: {'authorization': 'Bearer $accessToken'},
     );
@@ -97,6 +103,14 @@ class GuardianClient {
         throw QuotaExceeded(
           quotaMax: int.tryParse(response.headers.value('x-quota-limit') ?? ''),
           quotaResetsAt: parseQuotaReset(response.headers.value('x-quota-reset')),
+        );
+      case 451:
+        throw GuardianError(
+          ControlRelay.active == null
+              ? 'Mozilla doesn\'t offer the VPN in your region. Set a relay server in Account.'
+              : 'Mozilla doesn\'t offer the VPN in your region, and the relay did not get through. '
+                    'Check the relay server in Account.',
+          statusCode: 451,
         );
       default:
         final snippet = response.body.length > 300 ? response.body.substring(0, 300) : response.body;

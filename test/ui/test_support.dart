@@ -313,6 +313,23 @@ class FakeVpnController extends ChangeNotifier implements VpnController {
     notifyListeners();
   }
 
+  String _relayUrl = '';
+
+  @override
+  String get relayUrl => _relayUrl;
+
+  @override
+  bool get hasBuiltInRelay => false;
+
+  @override
+  bool setRelayUrl(String value) {
+    calls.add('setRelayUrl:$value');
+    if (value.trim().isNotEmpty && !value.trim().startsWith('https://')) return false;
+    _relayUrl = value.trim();
+    notifyListeners();
+    return true;
+  }
+
   bool _keepInTray = true;
   bool _trayHintShown = false;
 

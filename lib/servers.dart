@@ -1,6 +1,7 @@
-import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+
+import 'http_util.dart';
 
 /// Public Mozilla VPN server list (no login needed).
 const _serverListUrl =
@@ -47,23 +48,14 @@ class Location {
   }
 }
 
-Future<List<Location>> fetchLocations() async {
-  final client = HttpClient()..connectionTimeout = const Duration(seconds: 15);
-  try {
-    final request = await client.getUrl(Uri.parse(_serverListUrl));
-    request.headers
-      ..set(HttpHeaders.userAgentHeader, mozillaVpnUserAgent)
-      ..set(HttpHeaders.acceptHeader, 'application/json');
-    const responseTimeout = Duration(seconds: 20);
-    final response = await request.close().timeout(responseTimeout);
-    final body = await response.transform(utf8.decoder).join().timeout(responseTimeout);
-    if (response.statusCode != 200) {
-      throw HttpException('Server list fetch failed: HTTP ${response.statusCode}');
-    }
-    return parseLocations(body);
-  } finally {
-    client.close(force: true);
+/// Goes through [sendJson], so it has the same relay fallback as Guardian.
+/// [url] only exists for tests.
+Future<List<Location>> fetchLocations({Uri? url}) async {
+  final response = await sendJson('GET', url ?? Uri.parse(_serverListUrl));
+  if (response.statusCode != 200) {
+    throw HttpException('Server list fetch failed: HTTP ${response.statusCode}');
   }
+  return parseLocations(response.body);
 }
 
 List<Location> parseLocations(String rawJson) {
