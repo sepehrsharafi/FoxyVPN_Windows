@@ -43,6 +43,16 @@ class ControlRelay {
     return parse(user.isNotEmpty ? user : builtIn);
   }
 
+  /// Whether requests to [target] may go through the relay. Firefox Accounts
+  /// (sign-in, token refresh, its edge challenge) never does: its edge judges the
+  /// client by its IP and the cookie a passed challenge earned from that IP, and
+  /// from a Cloudflare Worker's IP it asks for a captcha (HTTP 406) the app cannot
+  /// answer. Only Guardian and the server list need the relay.
+  static bool carries(Uri target) {
+    final host = target.host.toLowerCase();
+    return host != 'firefox.com' && !host.endsWith('.firefox.com');
+  }
+
   /// The relay's host (to pin while the VPN is up), or null without a relay.
   static String? get host => active?.host;
 

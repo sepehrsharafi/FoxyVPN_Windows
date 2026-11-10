@@ -353,7 +353,7 @@ Future<JsonResponse> _send(String method, Uri uri,
     if (body != null) 'content-type': 'application/json',
   };
   // Cookies belong to the target, whichever way the response came.
-  var fallbackRelay = ControlRelay.active;
+  var fallbackRelay = ControlRelay.carries(uri) ? ControlRelay.active : null;
   JsonResponse? response;
   if (fallbackRelay != null && ControlRelay.relayFirst) {
     response = await _viaRelay(fallbackRelay, method, uri, requestHeaders, body, rethrowTimeout: true);

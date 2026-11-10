@@ -202,6 +202,43 @@ void main() {
       await expectLater(sendJson('GET', target), throwsA(isA<SocketException>()));
     });
 
+    test('only Firefox Accounts is kept off the relay', () {
+      for (final host in ['accounts.firefox.com', 'api.accounts.firefox.com', 'firefox.com']) {
+        expect(ControlRelay.carries(Uri.parse('https://$host/v1/x')), isFalse, reason: host);
+      }
+      for (final host in ['vpn.mozilla.org', 'firefox.settings.services.mozilla.com', 'notfirefox.com']) {
+        expect(ControlRelay.carries(Uri.parse('https://$host/x')), isTrue, reason: host);
+      }
+    });
+
+    test('Firefox Accounts goes direct even in relay-first mode, after 451 or a connection failure', () async {
+      const accounts = 'api.accounts.firefox.com';
+      ControlPlane.pinned[accounts] = [InternetAddress.loopbackIPv4];
+      final originSeen = <_Seen>[];
+      final relaySeen = <_Seen>[];
+      final guardianOrigin = await serve([], (r) => reply(r, 451));
+      final accountsOrigin = await serve(originSeen, (r) => reply(r, 406, body: 'challenge'));
+      final relay = await serve(relaySeen, (r) => reply(r, 200, body: 'r', marker: true));
+      useRelay(relay);
+
+      await sendJson('GET', guardian(guardianOrigin));
+      expect(ControlRelay.relayFirst, isTrue);
+      relaySeen.clear();
+
+      final login = Uri.parse('http://$accounts:${accountsOrigin.port}/v1/account/login');
+      // A 406 without edgeChallenge becomes BrowserCheckRequired: it came from the origin, directly.
+      await expectLater(sendJson('POST', login, body: const []), throwsA(isA<BrowserCheckRequired>()));
+      expect(originSeen, hasLength(1));
+      expect(relaySeen, isEmpty);
+
+      final closed = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      final closedPort = closed.port;
+      await closed.close(force: true);
+      await expectLater(sendJson('POST', Uri.parse('http://$accounts:$closedPort/v1/x'), body: const []),
+          throwsA(isA<SocketException>()));
+      expect(relaySeen, isEmpty);
+    });
+
     test('stays out of the way when direct works', () async {
       final relaySeen = <_Seen>[];
       final origin = await serve([], (r) => reply(r, 200));
