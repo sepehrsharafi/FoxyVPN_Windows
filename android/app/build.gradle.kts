@@ -84,8 +84,9 @@ android {
 
     packaging {
         jniLibs {
-            // Keep the native libraries page-aligned and uncompressed-friendly for 16 KB devices.
-            useLegacyPackaging = false
+            // foxy-core (the Go engine, shipped as libfoxycore.so) is an executable, not a library:
+            // it must be extracted to nativeLibraryDir to be run, which only legacy packaging does.
+            useLegacyPackaging = true
         }
     }
 

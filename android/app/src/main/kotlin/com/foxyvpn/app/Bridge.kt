@@ -29,6 +29,7 @@ import java.lang.ref.WeakReference
  *   setTileState({signedIn, phase?, label?}) -> null   what the Quick Settings tile shows (phase: off, connecting, connected, disconnecting)
  *   status()                       -> {active: bool}
  *   filesDir()                     -> String app-private files directory
+ *   nativeLibraryDir()             -> String where the native libraries are extracted (foxy-core is run from here)
  *   requestNotifications()         -> bool   POST_NOTIFICATIONS on Android 13+ (asked once)
  *   takeAutoStart()                -> bool   true once if Android started the service (Always-on VPN)
  *   secureGet/securePut/secureDelete({key[, value]})   Android Keystore AES-GCM storage
@@ -141,6 +142,7 @@ object Bridge {
         try {
             when (call.method) {
                 "filesDir" -> result.success(context.filesDir.absolutePath)
+                "nativeLibraryDir" -> result.success(context.applicationInfo.nativeLibraryDir)
                 "prepare" -> prepare(context, result)
                 "start" -> start(context, call, result)
                 "stop" -> {

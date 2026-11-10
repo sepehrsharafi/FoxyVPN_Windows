@@ -10,6 +10,7 @@ import '../servers.dart';
 import 'dns.dart';
 import 'exit_check.dart';
 import 'socks_server.dart';
+import 'connector.dart';
 import 'upstream.dart';
 
 enum VpnPhase { connecting, connected, reconnecting, stopped }
@@ -27,7 +28,7 @@ const _connectTimeout = Duration(seconds: 10);
 const _reconnectGiveUp = Duration(minutes: 2);
 const _reconnectWait = Duration(seconds: 12);
 
-typedef UpstreamConnector = Future<UpstreamSession> Function(
+typedef UpstreamConnector = Future<Upstream> Function(
   ServerNode server, {
   required String token,
   InternetAddress? pinnedAddress,
@@ -38,7 +39,7 @@ typedef UpstreamConnector = Future<UpstreamSession> Function(
 /// HTTP/2 upstream session to Mozilla's servers, kept alive across drops.
 class VpnSession {
   /// How upstream connections are made; replaced in tests.
-  static UpstreamConnector connector = UpstreamSession.connect;
+  static UpstreamConnector connector = defaultUpstreamConnector;
 
   VpnSession._(this._account, this._log, this._beforeReconnect, this._directFallback);
 
@@ -52,10 +53,10 @@ class VpnSession {
   late final DnsResolver _dns;
   late final LocalSocksServer _socks;
 
-  UpstreamSession? _upstream;
+  Upstream? _upstream;
   Completer<void>? _reconnected;
-  Future<UpstreamSession>? _rotating;
-  final _drained = <UpstreamSession>[];
+  Future<Upstream>? _rotating;
+  final _drained = <Upstream>[];
   Timer? _renewTimer;
   Future<void>? _renewing;
   String _token = '';
@@ -162,7 +163,7 @@ class VpnSession {
     _applyPass(pass);
 
     Object? lastFailure;
-    UpstreamSession? upstream;
+    Upstream? upstream;
     for (final node in location.servers) {
       _log?.call('Connecting to ${node.host}:${node.port}');
       try {
@@ -199,7 +200,7 @@ class VpnSession {
     _log?.call('Connected via ${_node.host} ($_pinned); SOCKS on 127.0.0.1:$socksPort');
   }
 
-  void _adopt(UpstreamSession upstream) {
+  void _adopt(Upstream upstream) {
     _upstream = upstream;
     upstream.done.then((_) {
       if (identical(_upstream, upstream)) _reconnect();
@@ -267,7 +268,7 @@ class VpnSession {
   /// A CONNECT-UDP flow, authenticated with the pass current at this moment.
   Future<TunnelStream> _dialUdp(String host, int port) => _dialVia((upstream) => upstream.openUdp(host, port));
 
-  Future<TunnelStream> _dialVia(Future<TunnelStream> Function(UpstreamSession) open) async {
+  Future<TunnelStream> _dialVia(Future<TunnelStream> Function(Upstream) open) async {
     try {
       return await _dialViaInner(open);
     } catch (e) {
@@ -299,7 +300,7 @@ class VpnSession {
     _log?.call('Opening a flow failed: $e$detail; $state$skipped');
   }
 
-  Future<TunnelStream> _dialViaInner(Future<TunnelStream> Function(UpstreamSession) open) async {
+  Future<TunnelStream> _dialViaInner(Future<TunnelStream> Function(Upstream) open) async {
     var retriedToken = false;
     var drainRetries = 0;
     while (true) {
@@ -321,7 +322,7 @@ class VpnSession {
     }
   }
 
-  Future<UpstreamSession> _readyUpstream() async {
+  Future<Upstream> _readyUpstream() async {
     var upstream = _upstream;
     // A full connection (MAX_CONCURRENT_STREAMS) is still alive: open() waits
     // for a slot. Only a dead connection triggers a reconnect.
@@ -341,10 +342,10 @@ class VpnSession {
 
   /// The edge sent GOAWAY: new flows go to a fresh connection to the same
   /// pinned IP while the old one finishes the flows it already carries.
-  Future<UpstreamSession> _rotate(UpstreamSession old) =>
+  Future<Upstream> _rotate(Upstream old) =>
       _rotating ??= _doRotate(old).whenComplete(() => _rotating = null);
 
-  Future<UpstreamSession> _doRotate(UpstreamSession old) async {
+  Future<Upstream> _doRotate(Upstream old) async {
     _log?.call('Upstream is draining (GOAWAY), opening a fresh connection');
     final fresh = await connector(_node, token: _token, pinnedAddress: _pinned, timeout: _connectTimeout);
     if (_stopped || !identical(_upstream, old)) {

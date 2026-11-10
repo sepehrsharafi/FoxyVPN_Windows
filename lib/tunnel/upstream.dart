@@ -10,8 +10,6 @@ import 'dart:typed_data';
 import 'package:http2/http2.dart';
 
 import '../servers.dart';
-import '../app_log.dart';
-import 'tls_helper.dart';
 import 'udp_relay.dart' show connectUdpPath;
 import 'upstream_trust.dart';
 
@@ -66,21 +64,58 @@ class TunnelStream {
   void abort() => onAbort?.call();
 }
 
-class UpstreamSession {
+/// One connection to the edge that carries every flow: what [VpnSession] needs.
+/// Implemented by [UpstreamSession] (pure Dart HTTP/2) and by the foxy-core
+/// engine (engine.dart).
+abstract interface class Upstream {
+  /// The IP actually connected to (the routing layer keeps it outside the VPN).
+  InternetAddress get address;
+
+  /// The connection is usable.
+  bool get alive;
+
+  /// The peer sent GOAWAY: existing flows keep running, new ones need a new session.
+  bool get draining;
+
+  /// Completes when the connection has closed or died.
+  Future<void> get done;
+
+  /// Flows currently running.
+  int get activeStreams;
+
+  /// The server's MAX_CONCURRENT_STREAMS, if known.
+  int? get peerMaxStreams;
+
+  /// Why the connection ended (for the log); null while it is alive.
+  String? get deathReason;
+
+  /// A TCP flow: CONNECT [host]:[port].
+  Future<TunnelStream> open(String host, int port, {Duration timeout});
+
+  /// A UDP flow (RFC 9298 CONNECT-UDP); the stream carries capsules.
+  Future<TunnelStream> openUdp(String host, int port, {Duration timeout});
+
+  /// New flows authenticate with this token; existing ones keep running.
+  void updateToken(String token);
+
+  /// Closes once the last flow has finished, or after a while.
+  void closeWhenIdle({Duration maxWait});
+
+  Future<void> close();
+}
+
+class UpstreamSession implements Upstream {
   /// Wraps an already-connected socket carrying HTTP/2 (TLS already done, or
-  /// plaintext in tests). Prefer [connect]. [incoming], when given, is read
-  /// instead of [socket] (the foxy-tls helper's connection, its reply line
-  /// already taken off).
+  /// plaintext in tests). Prefer [connect].
   UpstreamSession.withSocket(
     Socket socket, {
     required String token,
     required this.address,
     String? authority,
-    Stream<Uint8List>? incoming,
   }) : _socket = socket,
        _authority = authority ?? address.address {
     _token = token;
-    final received = (incoming ?? socket).transform(
+    final received = socket.transform(
       StreamTransformer<Uint8List, List<int>>.fromHandlers(
         handleData: (data, sink) {
           _lastReceived = _clock.elapsed;
@@ -112,14 +147,11 @@ class UpstreamSession {
     InternetAddress? pinnedAddress,
     Duration timeout = const Duration(seconds: 15),
   }) async {
-    final address = pinnedAddress ?? await _resolve(server.host, timeout);
-    final viaHelper = await _connectViaHelper(server, address, token, timeout);
-    if (viaHelper != null) return viaHelper;
+    final address = pinnedAddress ?? await resolveIPv4(server.host, timeout);
     Socket? raw;
     try {
       raw = await Socket.connect(address, server.port, timeout: timeout);
       raw.setOption(SocketOption.tcpNoDelay, true);
-      limitSendBuffer(raw, 256 * 1024);
       final tls = await SecureSocket.secure(
         raw,
         host: server.host,
@@ -149,42 +181,7 @@ class UpstreamSession {
     }
   }
 
-  /// TLS with Firefox's ClientHello through foxy-tls.exe (Windows). Null when
-  /// the helper is not there or failed: the caller then uses Dart's own TLS.
-  static Future<UpstreamSession?> _connectViaHelper(
-    ServerNode server,
-    InternetAddress address,
-    String token,
-    Duration timeout,
-  ) async {
-    HelperTls? tls;
-    try {
-      final helper = await TlsHelper.get();
-      if (helper == null) return null;
-      tls = await helper.open(address, server.port, server.host, timeout);
-      final session = UpstreamSession.withSocket(
-        tls.socket,
-        incoming: tls.incoming,
-        token: token,
-        address: address,
-        authority: '${server.host}:${server.port}',
-      );
-      try {
-        await session._conn.onInitialPeerSettingsReceived.timeout(timeout);
-      } catch (_) {
-        await session.close();
-        rethrow;
-      }
-      AppLog.write('Firefox TLS to ${address.address} (${tls.info.trim()})');
-      return session;
-    } catch (e) {
-      tls?.socket.destroy();
-      AppLog.write('Firefox TLS failed ($e); using the built-in TLS');
-      return null;
-    }
-  }
-
-  static Future<InternetAddress> _resolve(String host, Duration timeout) async {
+  static Future<InternetAddress> resolveIPv4(String host, Duration timeout) async {
     // IPv4 only: the pinned address gets a /32 bypass route, which keeps the
     // proxy connection out of the tunnel. The proxy's IPv6 addresses would be
     // routed into the TUN (::/1 and 8000::/1), so they are never used.
@@ -195,6 +192,7 @@ class UpstreamSession {
   }
 
   /// The IP actually connected to (the routing layer keeps it outside the VPN).
+  @override
   final InternetAddress address;
 
   final Socket _socket;
@@ -212,6 +210,7 @@ class UpstreamSession {
   String? _deathReason;
 
   /// Why the connection ended (for the log); null while it is alive.
+  @override
   String? get deathReason => _deathReason ?? _conn.terminationReason;
   int _bytesReceived = 0;
 
@@ -229,27 +228,34 @@ class UpstreamSession {
 
   /// The connection itself is usable. Unlike the HTTP/2 library's `isOpen`
   /// this stays true while the peer's concurrent-stream limit is reached.
+  @override
   bool get alive => !_closed && !_dead;
 
   /// The peer sent GOAWAY (or the connection is finishing): existing streams
   /// keep running, but new ones need a different session.
+  @override
   bool get draining => alive && _conn.isDraining;
 
   /// Flows currently running on this connection.
+  @override
   int get activeStreams => _activeStreams;
 
   /// The server's MAX_CONCURRENT_STREAMS, if it sent one.
+  @override
   int? get peerMaxStreams => _conn.peerMaxConcurrentStreams;
 
   /// Completes when the connection has closed or died.
+  @override
   Future<void> get done => _done.future;
 
   /// New streams authenticate with this token; existing ones keep running.
+  @override
   void updateToken(String token) {
     if (token.isNotEmpty) _token = token;
   }
 
   /// A TCP flow: CONNECT [host]:[port].
+  @override
   Future<TunnelStream> open(
     String host,
     int port, {
@@ -265,6 +271,7 @@ class UpstreamSession {
 
   /// A UDP flow (RFC 9298 CONNECT-UDP). The stream carries capsules, see
   /// udp_relay.dart. The pass current at call time authenticates it.
+  @override
   Future<TunnelStream> openUdp(
     String host,
     int port, {
@@ -384,6 +391,7 @@ class UpstreamSession {
 
   /// For a session replaced after GOAWAY: closes it once its last flow has
   /// finished, or after [maxWait], whichever comes first.
+  @override
   void closeWhenIdle({Duration maxWait = const Duration(minutes: 5)}) {
     final until = DateTime.now().add(maxWait);
     Future<void> check() async {
@@ -396,6 +404,7 @@ class UpstreamSession {
     unawaited(check());
   }
 
+  @override
   Future<void> close() async {
     if (_closed) return;
     _closed = true;

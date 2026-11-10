@@ -60,6 +60,9 @@ class AndroidBridge {
   /// The app's private files directory (settings, log).
   Future<String> filesDir() async => (await _method.invokeMethod<String>('filesDir'))!;
 
+  /// Where Android unpacked the app's native libraries (foxy-core lives there).
+  Future<String> nativeLibraryDir() async => (await _method.invokeMethod<String>('nativeLibraryDir'))!;
+
   /// Asks Android for the VPN permission (the system "Connection request" dialog,
   /// shown by the Activity). False if the user said no, or there is no Activity.
   Future<bool> prepare() async => (await _method.invokeMethod<bool>('prepare')) ?? false;
