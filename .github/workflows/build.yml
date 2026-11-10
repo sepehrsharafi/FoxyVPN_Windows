@@ -1,8 +1,8 @@
 name: Build
 
-# A push builds only the Android APK, to save runner time. Windows (installer,
-# portable zip, and the Flutter tests) and macOS (disk image) are built on demand:
-# Actions > Build > Run workflow, then tick them. (macos-port is the macOS work in progress.)
+# Every push builds all three: Android (APK), Windows (installer, portable zip, and
+# the Flutter tests) and macOS (disk image). Actions > Build > Run workflow builds
+# them on demand; untick a system there to skip it. (macos-port is the macOS work in progress.)
 
 on:
   push:
@@ -16,11 +16,11 @@ on:
       windows:
         description: Build Windows (and run the Flutter tests)
         type: boolean
-        default: false
+        default: true
       macos:
         description: Build macOS
         type: boolean
-        default: false
+        default: true
 
 env:
   # Pinned third-party binaries (checksums computed from the official downloads).
@@ -52,7 +52,7 @@ jobs:
 
   windows:
     needs: analyze
-    if: github.event_name == 'workflow_dispatch' && inputs.windows
+    if: github.event_name == 'push' || inputs.windows
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -351,7 +351,7 @@ jobs:
 
   macos:
     needs: analyze
-    if: github.event_name == 'workflow_dispatch' && inputs.macos
+    if: github.event_name == 'push' || inputs.macos
     runs-on: macos-latest
     timeout-minutes: 45
     steps:
