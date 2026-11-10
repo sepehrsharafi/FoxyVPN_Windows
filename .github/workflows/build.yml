@@ -1,7 +1,7 @@
 name: Build
 
-# Every push builds Windows only (installer, portable zip, and
-# the Flutter tests). Android (APK) and macOS (disk image) build only from Actions > Build > Run workflow, which builds
+# Every push builds all three: Android (APK), Windows (installer, portable zip, and
+# the Flutter tests) and macOS (disk image). Actions > Build > Run workflow builds
 # them on demand; untick a system there to skip it. (macos-port is the macOS work in progress.)
 
 on:
@@ -309,7 +309,7 @@ jobs:
 
   android:
     needs: analyze
-    if: github.event_name == 'workflow_dispatch' && inputs.android
+    if: github.event_name == 'push' || inputs.android
     runs-on: ubuntu-latest
     env:
       HAS_RELEASE_KEY: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
@@ -368,7 +368,7 @@ jobs:
 
   macos:
     needs: analyze
-    if: github.event_name == 'workflow_dispatch' && inputs.macos
+    if: github.event_name == 'push' || inputs.macos
     runs-on: macos-latest
     timeout-minutes: 45
     steps:
