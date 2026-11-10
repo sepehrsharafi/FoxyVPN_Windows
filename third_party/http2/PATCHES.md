@@ -66,3 +66,11 @@ Changes (all marked `PATCH(foxyvpn)`):
 Measured with a loopback benchmark (SOCKS server + `UpstreamSession` against a
 local HTTP/2 edge, plaintext, AOT, 8 flows x 128 MB; CPU of the app process
 only): download 5.0 -> 2.5 ms CPU per MB, upload 3.6 -> 2.6 ms per MB.
+11. `lib/src/streams/stream_handler.dart` (`_terminateStream`): the
+   RST_STREAM of a stream the app cancels goes through the connection's
+   outgoing queue instead of straight to the frame writer, so it can never
+   overtake that stream's HEADERS. Stock 3.1.0 writes it directly; when the
+   HEADERS still waits in the queue (behind DATA without window, or a busy
+   socket) the peer sees RST_STREAM for an idle stream, a connection error
+   (RFC 9113 6.4). Fastly then sends GOAWAY PROTOCOL_ERROR "unexpected stream
+   id in RST_STREAM frame" and closes the connection with every flow on it.

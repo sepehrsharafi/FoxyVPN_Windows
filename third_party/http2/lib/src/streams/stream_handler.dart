@@ -474,7 +474,20 @@ class StreamHandler extends Object with TerminatableMixin, ClosableMixin {
         stream.state == StreamState.HalfClosedRemote ||
         stream.state == StreamState.ReservedLocal ||
         stream.state == StreamState.ReservedRemote) {
-      _frameWriter.writeRstStreamFrame(stream.id, ErrorCode.CANCEL);
+      // PATCH(foxyvpn): see PATCHES.md (11). The RST_STREAM goes through the
+      // connection queue, behind this stream's HEADERS: written directly it
+      // could overtake HEADERS still queued (behind DATA waiting for window
+      // or a busy socket), and an RST_STREAM for a stream the peer has not
+      // seen is a connection error (RFC 9113 6.4): Fastly answers GOAWAY
+      // PROTOCOL_ERROR "unexpected stream id in RST_STREAM frame" and closes
+      // every stream on the connection.
+      if (outgoingQueue.isClosing || outgoingQueue.wasTerminated) {
+        _frameWriter.writeRstStreamFrame(stream.id, ErrorCode.CANCEL);
+      } else {
+        outgoingQueue.enqueueMessage(
+          ResetStreamMessage(stream.id, ErrorCode.CANCEL),
+        );
+      }
       _closeStreamAbnormally(stream, null, propagateException: false);
     }
   }
