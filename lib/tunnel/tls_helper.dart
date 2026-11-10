@@ -12,6 +12,8 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import '../app_log.dart';
+
 const helperExeName = 'foxy-tls.exe';
 
 /// A TLS connection made by the helper: [socket] to write to, [incoming] for
@@ -59,7 +61,10 @@ class TlsHelper {
     Process? process;
     try {
       process = await Process.start(exe.path, const []);
-      process.stderr.drain<void>().ignore();
+      process.stderr
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())
+          .listen((line) => AppLog.write('foxy-tls: $line'), onError: (_) {});
       final line = await process.stdout
           .transform(utf8.decoder)
           .transform(const LineSplitter())

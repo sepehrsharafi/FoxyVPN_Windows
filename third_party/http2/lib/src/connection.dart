@@ -155,6 +155,9 @@ abstract class Connection {
   // PATCH(foxyvpn): see PATCHES.md (10).
   String? terminationReason;
 
+  // PATCH(foxyvpn): see PATCHES.md (10).
+  String? goawayReceived;
+
   Connection(
     Stream<List<int>> incoming,
     StreamSink<List<int>> outgoing,
@@ -407,6 +410,10 @@ abstract class Connection {
       } else if (frame is WindowUpdateFrame) {
         _connectionWindowHandler.processWindowUpdate(frame);
       } else if (frame is GoawayFrame) {
+        // PATCH(foxyvpn): see PATCHES.md (10).
+        final debug = utf8.decode(frame.debugData, allowMalformed: true).trim();
+        goawayReceived = 'GOAWAY code ${frame.errorCode}, last stream '
+            '${frame.lastStreamId}${debug.isEmpty ? '' : ': $debug'}';
         _streams.processGoawayFrame(frame);
         _finishing(active: false);
       } else if (frame is UnknownFrame) {

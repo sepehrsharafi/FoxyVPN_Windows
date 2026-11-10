@@ -106,6 +106,10 @@ abstract class ClientTransportConnection extends TransportConnection {
   /// message, or "transport closed"); null while it is not terminated.
   String? get terminationReason;
 
+  /// PATCH(foxyvpn): the GOAWAY the peer sent (code, last stream, debug
+  /// text), or null if none came. For logs.
+  String? get goawayReceived;
+
   /// The maximum number of concurrent streams the peer currently allows, per
   /// its most recent SETTINGS_MAX_CONCURRENT_STREAMS (RFC 7540 6.5.2), or
   /// `null` if the peer hasn't advertised a limit.

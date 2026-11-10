@@ -118,7 +118,39 @@ func serve(local net.Conn) {
 	if !reply(local, "OK "+tlsInfo) {
 		return
 	}
-	pipe(local, r, remote)
+	start := time.Now()
+	up, down, appClosed, remoteErr := pipe(local, r, remote)
+	if !appClosed {
+		// The app reads these lines from stderr into its log.
+		fmt.Fprintf(os.Stderr, "%s ended the connection: %s; open %.0f s, %.1f MB in, %.1f MB out\n",
+			ip, describeEnd(remoteErr), time.Since(start).Seconds(),
+			float64(down)/(1<<20), float64(up)/(1<<20))
+	}
+}
+
+// describeEnd says how the server's side ended: a TLS close_notify is the
+// server closing on purpose; a bare FIN or a reset without it is usually
+// something on the way (a firewall) cutting the connection.
+func describeEnd(err error) string {
+	switch {
+	case err == nil:
+		return "clean TLS close (close_notify)"
+	case errors.Is(err, io.ErrUnexpectedEOF):
+		return "TCP FIN without TLS close_notify"
+	case isReset(err):
+		return "TCP reset"
+	default:
+		return oneLine(err.Error())
+	}
+}
+
+func isReset(err error) bool {
+	var op *net.OpError
+	if errors.As(err, &op) {
+		s := op.Err.Error()
+		return strings.Contains(s, "reset") || strings.Contains(s, "forcibly closed") || strings.Contains(s, "aborted")
+	}
+	return false
 }
 
 func connect(ip net.IP, port int, name string) (net.Conn, string, error) {
@@ -168,28 +200,28 @@ func reply(c net.Conn, s string) bool {
 
 // pipe copies both ways; the end of one direction is passed on as a
 // half-close where possible, and both close once both directions are done.
-func pipe(local net.Conn, localIn *bufio.Reader, remote net.Conn) {
+// It reports the bytes each way, whether the app's side ended first, and the
+// error the server's side ended with (nil: a clean TLS close).
+func pipe(local net.Conn, localIn *bufio.Reader, remote net.Conn) (up, down int64, appClosed bool, remoteErr error) {
 	var wg sync.WaitGroup
+	var once sync.Once
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(remote, localIn)
-		if cw, ok := remote.(interface{ CloseWrite() error }); ok {
-			_ = cw.CloseWrite()
-		} else {
-			_ = remote.Close()
-		}
+		up, _ = io.Copy(remote, localIn)
+		once.Do(func() { appClosed = true })
+		// The app is done with this connection: end it (the server would
+		// otherwise keep it open).
+		_ = remote.Close()
 	}()
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(local, remote)
-		if tcp, ok := local.(*net.TCPConn); ok {
-			_ = tcp.CloseWrite()
-		} else {
-			_ = local.Close()
-		}
+		down, remoteErr = io.Copy(local, remote)
+		once.Do(func() {})
+		_ = local.Close()
 	}()
 	wg.Wait()
+	return
 }
 
 func oneLine(s string) string {

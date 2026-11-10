@@ -84,6 +84,7 @@ class UpstreamSession {
       StreamTransformer<Uint8List, List<int>>.fromHandlers(
         handleData: (data, sink) {
           _lastReceived = _clock.elapsed;
+          _bytesReceived += data.length;
           sink.add(data);
         },
         handleError: (e, st, sink) {
@@ -211,10 +212,18 @@ class UpstreamSession {
 
   /// Why the connection ended (for the log); null while it is alive.
   String? get deathReason => _deathReason ?? _conn.terminationReason;
+  int _bytesReceived = 0;
 
   void _markDead(String reason) {
     _dead = true;
-    _deathReason ??= reason;
+    if (_deathReason != null) return;
+    final now = _clock.elapsed;
+    final idle = (now - _lastReceived).inMilliseconds / 1000;
+    final mb = (_bytesReceived / (1024 * 1024)).toStringAsFixed(1);
+    final goaway = _conn.goawayReceived;
+    _deathReason = '$reason${goaway == null ? '' : '; after $goaway'}; '
+        'open ${now.inSeconds} s, $mb MB in, last data ${idle.toStringAsFixed(1)} s before, '
+        '$_activeStreams flows';
   }
 
   /// The connection itself is usable. Unlike the HTTP/2 library's `isOpen`
