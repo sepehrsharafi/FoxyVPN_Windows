@@ -10,11 +10,13 @@ import 'dart:typed_data';
 import 'package:http2/http2.dart';
 
 import '../servers.dart';
+import '../app_log.dart';
+import 'tls_helper.dart';
 import 'udp_relay.dart' show connectUdpPath;
 import 'upstream_trust.dart';
 
-const _pingInterval = Duration(seconds: 30);
-const _pingTimeout = Duration(seconds: 20);
+const _pingInterval = Duration(seconds: 10);
+const _pingTimeout = Duration(seconds: 10);
 const _streamWindowBytes = 1024 * 1024;
 
 /// The edge answered a CONNECT with a non-2xx status.
@@ -66,16 +68,19 @@ class TunnelStream {
 
 class UpstreamSession {
   /// Wraps an already-connected socket carrying HTTP/2 (TLS already done, or
-  /// plaintext in tests). Prefer [connect].
+  /// plaintext in tests). Prefer [connect]. [incoming], when given, is read
+  /// instead of [socket] (the foxy-tls helper's connection, its reply line
+  /// already taken off).
   UpstreamSession.withSocket(
     Socket socket, {
     required String token,
     required this.address,
     String? authority,
+    Stream<Uint8List>? incoming,
   }) : _socket = socket,
        _authority = authority ?? address.address {
     _token = token;
-    final incoming = socket.transform(
+    final received = (incoming ?? socket).transform(
       StreamTransformer<Uint8List, List<int>>.fromHandlers(
         handleData: (data, sink) {
           _lastReceived = _clock.elapsed;
@@ -93,7 +98,7 @@ class UpstreamSession {
       ),
     );
     _conn = ClientTransportConnection.viaStreams(
-      incoming,
+      received,
       socket,
       settings: const ClientSettings(streamWindowSize: _streamWindowBytes),
     );
@@ -107,6 +112,8 @@ class UpstreamSession {
     Duration timeout = const Duration(seconds: 15),
   }) async {
     final address = pinnedAddress ?? await _resolve(server.host, timeout);
+    final viaHelper = await _connectViaHelper(server, address, token, timeout);
+    if (viaHelper != null) return viaHelper;
     Socket? raw;
     try {
       raw = await Socket.connect(address, server.port, timeout: timeout);
@@ -137,6 +144,41 @@ class UpstreamSession {
     } catch (_) {
       raw?.destroy();
       rethrow;
+    }
+  }
+
+  /// TLS with Firefox's ClientHello through foxy-tls.exe (Windows). Null when
+  /// the helper is not there or failed: the caller then uses Dart's own TLS.
+  static Future<UpstreamSession?> _connectViaHelper(
+    ServerNode server,
+    InternetAddress address,
+    String token,
+    Duration timeout,
+  ) async {
+    HelperTls? tls;
+    try {
+      final helper = await TlsHelper.get();
+      if (helper == null) return null;
+      tls = await helper.open(address, server.port, server.host, timeout);
+      final session = UpstreamSession.withSocket(
+        tls.socket,
+        incoming: tls.incoming,
+        token: token,
+        address: address,
+        authority: '${server.host}:${server.port}',
+      );
+      try {
+        await session._conn.onInitialPeerSettingsReceived.timeout(timeout);
+      } catch (_) {
+        await session.close();
+        rethrow;
+      }
+      AppLog.write('Firefox TLS to ${address.address} (${tls.info.trim()})');
+      return session;
+    } catch (e) {
+      tls?.socket.destroy();
+      AppLog.write('Firefox TLS failed ($e); using the built-in TLS');
+      return null;
     }
   }
 

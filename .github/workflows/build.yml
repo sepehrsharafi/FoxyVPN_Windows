@@ -71,6 +71,23 @@ jobs:
           FOXY_RELAY_URL: ${{ secrets.FOXY_RELAY_URL }}
         run: flutter build windows --release --dart-define=FOXY_RELAY_URL="$FOXY_RELAY_URL"
 
+      # foxy-tls.exe: the upstream TLS with Firefox's ClientHello (tls_helper/).
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: tls_helper/go.mod
+          cache-dependency-path: tls_helper/go.sum
+
+      - name: Build foxy-tls.exe next to foxyvpn.exe
+        shell: bash
+        working-directory: tls_helper
+        env:
+          CGO_ENABLED: '0'
+          GOOS: windows
+          GOARCH: amd64
+        run: |
+          go vet ./...
+          go build -trimpath -ldflags "-s -w -H windowsgui" -o ../build/windows/x64/runner/Release/foxy-tls.exe .
+
       - name: Add tun2socks and Wintun next to foxyvpn.exe
         shell: pwsh
         run: |
@@ -103,7 +120,7 @@ jobs:
           Copy-Item "$dl/wintun/wintun/LICENSE.txt" "$release/licenses/wintun-LICENSE.txt"
           Copy-Item LICENSE "$release/licenses/FoxyVPN-LICENSE.txt"
 
-          foreach ($f in 'foxyvpn.exe', 'tun2socks.exe', 'wintun.dll') {
+          foreach ($f in 'foxyvpn.exe', 'foxy-tls.exe', 'tun2socks.exe', 'wintun.dll') {
             if (-not (Test-Path "$release/$f")) { throw "$f is missing from the release folder" }
           }
 
