@@ -157,6 +157,34 @@ void main() {
       expect(edge.answers, isEmpty);
     });
 
+    test('a captcha is shown through the solver and its answer posted back', () async {
+      edge.challengeType = 'captcha';
+      final shown = <List<int>>[];
+      EdgeCaptcha.solver = (image) async {
+        shown.add(image);
+        return ' AB12 ';
+      };
+      addTearDown(() => EdgeCaptcha.solver = null);
+      final response = await signIn();
+      expect(response.statusCode, 200);
+      expect(shown.single, base64.decode('iVBORw0KGgo='));
+      expect(edge.answers.single['data'].first, {'ty': 'captcha', 'answer': 'AB12'});
+    });
+
+    test('a cancelled captcha reports the 406', () async {
+      edge.challengeType = 'captcha';
+      EdgeCaptcha.solver = (_) async => null;
+      addTearDown(() => EdgeCaptcha.solver = null);
+      await expectLater(signIn(), throwsA(isA<BrowserCheckRequired>()));
+      expect(edge.answers, isEmpty);
+    });
+
+    test('captcha data URLs decode; anything else is refused', () {
+      expect(captchaImage('data:image/png;base64,iVBORw0KGgo='), base64.decode('iVBORw0KGgo='));
+      expect(captchaImage('https://example.com/x.png'), isNull);
+      expect(captchaImage('data:image/png,raw'), isNull);
+    });
+
     test('a site without a challenge page reports the 406 after one attempt', () async {
       edge.servesChallenge = false;
       await expectLater(signIn(), throwsA(isA<BrowserCheckRequired>()));
@@ -204,6 +232,7 @@ class FakeEdge {
             'hash': sha256.convert(utf8.encode('b4seQ7')).toString(),
             'hmac': 'mac',
             'expires': 99,
+            'image_b64': 'data:image/png;base64,iVBORw0KGgo=',
           },
         },
         {'ty': 'pat', 'data': {}},

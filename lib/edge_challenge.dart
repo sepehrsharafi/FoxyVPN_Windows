@@ -1,21 +1,34 @@
 // The bot check the edge (Fastly) in front of Firefox Accounts answers some
-// requests with: HTTP 406 instead of the API's reply. It is a short machine
-// exchange, not a page for a person: find the challenge path on the site's root
-// page, read the challenge list from its script, answer it (a small
-// proof-of-work, a private-access-token probe, client metrics) and post the
+// requests with: HTTP 406 instead of the API's reply. Find the challenge path on
+// the site's root page, read the challenge list from its script, answer it (a
+// small proof-of-work, a private-access-token probe, client metrics, and an
+// image captcha the person types, through [EdgeCaptcha.solver]) and post the
 // answers back. The edge then sets a cookie ([CookieJar]) that lets the retried
-// request through. Interactive challenges are not answered; the caller reports
-// the 406 as before.
+// request through. Without a solver (a background token refresh) a captcha is
+// not answered and the caller reports the 406 as before.
 //
 // The exchange follows NAT-on-steroids' internal/vpn/challenge.go (the bounded
-// PoW/PAT flow of Mozilla's Android client).
+// PoW/PAT flow of Mozilla's Android client); the captcha follows Arman VPN's
+// core (internal/fxa/challenge.go), which shows the image to the person.
 
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 
 import 'app_log.dart';
 import 'http_util.dart';
+
+/// Shows the edge's captcha image to the person and gives back what they typed,
+/// or null when they cancel.
+typedef CaptchaSolver = Future<String?> Function(Uint8List image);
+
+class EdgeCaptcha {
+  EdgeCaptcha._();
+
+  /// Set by the sign-in screen while it is shown; null elsewhere.
+  static CaptchaSolver? solver;
+}
 
 /// One request made as the refused client (same user agent, cookies and route).
 typedef ChallengeFetch = Future<JsonResponse> Function(String method, Uri uri,
@@ -24,8 +37,9 @@ typedef ChallengeFetch = Future<JsonResponse> Function(String method, Uri uri,
 final _challengePath = RegExp(r'/_fs-ch-[A-Za-z0-9]+');
 final _challengeInit = RegExp(r'init\((\[[^\]]*\]),\s*"([^"]+)",\s*"([^"]+)"');
 
-/// The edge may send another set of challenges after the first answers.
-const _maxRounds = 3;
+/// The edge may send another set of challenges after the first answers; a
+/// wrong captcha answer gets a new image (Arman VPN allows 8 rounds).
+const _maxRounds = 8;
 
 /// One solve per site at a time; requests refused meanwhile wait for its result.
 final Map<String, Future<bool>> _solving = {};
@@ -125,6 +139,14 @@ Future<String?> _solveAt(String origin, ChallengeFetch fetch) async {
             'detector_results': {},
             'v': 2,
           });
+        case 'captcha':
+          final solver = EdgeCaptcha.solver;
+          if (solver == null) return 'not answerable: the edge asked for a captcha and no one can type it here';
+          final image = captchaImage(data['image_b64'] ?? '');
+          if (image == null) return 'unrecognized captcha image';
+          final typed = (await solver(image))?.trim() ?? '';
+          if (typed.isEmpty) return 'not answerable: the captcha was cancelled';
+          answers.add({'ty': 'captcha', 'answer': typed});
         default:
           return 'not answerable: the edge asked for an interactive challenge ($type)';
       }
@@ -154,4 +176,17 @@ String? solveEdgePow(String base, String targetHex) {
     }
   }
   return null;
+}
+
+/// The bytes of a captcha's `data:image/...;base64,...` URL, or null when it is not one.
+Uint8List? captchaImage(String dataUrl) {
+  if (!dataUrl.startsWith('data:image/')) return null;
+  final comma = dataUrl.indexOf(',');
+  if (comma < 0 || !dataUrl.substring(0, comma).endsWith(';base64')) return null;
+  try {
+    final bytes = base64.decode(base64.normalize(dataUrl.substring(comma + 1).trim()));
+    return bytes.isEmpty ? null : bytes;
+  } on FormatException {
+    return null;
+  }
 }

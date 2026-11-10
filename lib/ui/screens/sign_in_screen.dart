@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../../edge_challenge.dart' show EdgeCaptcha;
 import '../../errors.dart' show friendlyError;
 import '../../fxa.dart' show LoginDone, LoginNeedsCode;
 import '../../platform/host.dart';
@@ -13,6 +14,7 @@ import '../widgets/fox_mark.dart';
 import '../widgets/foxy_icon.dart';
 import '../widgets/foxy_route.dart';
 import '../widgets/foxy_text_field.dart';
+import '../widgets/notice_dialogs.dart' show showCaptchaDialog;
 import '../widgets/pressable.dart';
 import 'log_screen.dart';
 
@@ -44,7 +46,16 @@ class _SignInScreenState extends State<SignInScreen> {
   bool get _needsCode => _pendingSession != null;
 
   @override
+  void initState() {
+    super.initState();
+    // While this screen is up, Mozilla's image captcha (HTTP 406 during sign-in)
+    // is shown to the person instead of failing the sign-in.
+    EdgeCaptcha.solver = (image) async => mounted ? showCaptchaDialog(context, image) : null;
+  }
+
+  @override
   void dispose() {
+    EdgeCaptcha.solver = null;
     _email.dispose();
     _password.dispose();
     _code.dispose();

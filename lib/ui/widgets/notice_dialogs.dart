@@ -7,6 +7,7 @@ import '../../vpn_controller.dart';
 import '../theme.dart';
 import 'app_button.dart';
 import 'foxy_icon.dart';
+import 'foxy_text_field.dart';
 
 /// The two modal notices on Home: another proxy / VPN is active, and the VPN
 /// dropped. Modals float above everything, so nothing on Home ever moves.
@@ -403,6 +404,89 @@ class DropDialog extends StatelessWidget {
           ),
         );
       },
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Mozilla's image captcha (sign-in)
+// ---------------------------------------------------------------------------
+
+const captchaTitle = 'Mozilla\'s security check';
+
+/// Shows the captcha [image] Mozilla's edge sent during sign-in and gives back
+/// what the person typed, or null when they close it.
+Future<String?> showCaptchaDialog(BuildContext context, Uint8List image) =>
+    Navigator.of(context).push<String>(FoxyDialogRoute(builder: (_) => CaptchaDialog(image: image)));
+
+class CaptchaDialog extends StatefulWidget {
+  const CaptchaDialog({super.key, required this.image});
+
+  final Uint8List image;
+
+  @override
+  State<CaptchaDialog> createState() => _CaptchaDialogState();
+}
+
+class _CaptchaDialogState extends State<CaptchaDialog> {
+  final _answer = TextEditingController();
+
+  @override
+  void dispose() {
+    _answer.dispose();
+    super.dispose();
+  }
+
+  void _close([String? answer]) => Navigator.of(context).pop(answer);
+
+  void _submit() {
+    final typed = _answer.text.trim();
+    if (typed.isNotEmpty) _close(typed);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return _DialogFrame(
+      icon: FoxyIcons.alert,
+      iconColor: FoxyColors.warn,
+      title: captchaTitle,
+      onClose: _close,
+      body: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text('Type the characters in the image to continue signing in.', style: FoxyText.body.copyWith(fontSize: 15)),
+          const SizedBox(height: 12),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: ColoredBox(
+              color: Colors.white,
+              child: Image.memory(
+                widget.image,
+                height: 90,
+                fit: BoxFit.contain,
+                gaplessPlayback: true,
+                errorBuilder: (_, _, _) => const SizedBox(
+                  height: 90,
+                  child: Center(child: Text('The image could not be shown.')),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          FoxyTextField(
+            controller: _answer,
+            hint: 'Characters',
+            autofocus: true,
+            textInputAction: TextInputAction.done,
+            onSubmitted: (_) => _submit(),
+          ),
+        ],
+      ),
+      secondary: AppButton(label: 'Cancel', kind: AppButtonKind.secondary, onPressed: _close),
+      primary: ListenableBuilder(
+        listenable: _answer,
+        builder: (context, _) => AppButton(label: 'Continue', onPressed: _answer.text.trim().isEmpty ? null : _submit),
+      ),
     );
   }
 }

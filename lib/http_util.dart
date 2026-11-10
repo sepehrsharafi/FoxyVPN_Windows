@@ -240,6 +240,13 @@ class CookieJar {
 
   void clear() => _cookies.clear();
 
+  /// Every unexpired cookie, whatever it applies to.
+  List<StoredCookie> get all {
+    final at = DateTime.now();
+    _cookies.removeWhere((c) => c.expiredAt(at));
+    return [..._cookies];
+  }
+
   static String _defaultPath(String requestPath) {
     final slash = requestPath.lastIndexOf('/');
     return slash <= 0 ? '/' : requestPath.substring(0, slash);
@@ -311,9 +318,15 @@ Future<JsonResponse> sendJson(String method, Uri uri,
     (m, u, {List<int>? body, Map<String, String> headers = const {}}) =>
         _send(m, u, body: body, headers: headers, userAgent: agent, accept: '*/*', jar: fresh),
     onPassed: () {
-      final completion = [for (final c in fresh.cookiesFor(uri)) if (c.name.startsWith('_fs_ch_cp_')) c];
+      // The page that gets solved is often accounts.firefox.com, and its cookie may
+      // be scoped to that host alone; the refused API host gets a copy, as Arman VPN
+      // gives the earned cookies to every account host.
+      final completion = [for (final c in fresh.all) if (c.name.startsWith('_fs_ch_cp_')) c];
       for (final c in completion) {
-        CookieJar.shared.add(c);
+        CookieJar.shared.add(c.appliesTo(uri)
+            ? c
+            : StoredCookie(
+                name: c.name, value: c.value, domain: uri.host.toLowerCase(), hostOnly: true, path: '/', expires: c.expires));
       }
       return completion.isNotEmpty;
     },
