@@ -518,9 +518,18 @@ jobs:
           mkdir -p "$stage" dist
           # The smoke test put a test client into the bundle for a while: the
           # shipped app must be exactly what was signed.
-          test ! -e "$APP/Contents/MacOS/foxyvpn-smoke-client"
-          codesign --verify --deep --strict "$APP"
-          ditto "$APP" "$stage/FoxyVPN.app"
+          if [ -e "$APP/Contents/MacOS/foxyvpn-smoke-client" ]; then
+            echo "::error::The smoke-test client is still inside the app bundle"
+            exit 1
+          fi
+          if ! out="$(codesign --verify --deep --strict "$APP" 2>&1)"; then
+            echo "::error::The app's signature does not verify: $(echo "$out" | tr '\n' ' ')"
+            exit 1
+          fi
+          if ! out="$(ditto "$APP" "$stage/FoxyVPN.app" 2>&1)"; then
+            echo "::error::Copying the app failed: $(echo "$out" | tr '\n' ' ')"
+            exit 1
+          fi
           ln -s /Applications "$stage/Applications"
           cat > "$stage/Read me first.txt" <<'EOF'
           FoxyVPN for macOS
@@ -545,7 +554,22 @@ jobs:
 
             sudo "/Applications/FoxyVPN.app/Contents/Resources/helper/uninstall.sh"
           EOF
-          hdiutil create -volname FoxyVPN -srcfolder "$stage" -ov -format UDZO dist/FoxyVPN-macOS.dmg
+          # hdiutil on GitHub's macOS runners now and then fails with "Resource
+          # busy" (a disk image service still holding the previous attach): retry.
+          made=0
+          for attempt in 1 2 3 4 5; do
+            if hdiutil create -volname FoxyVPN -srcfolder "$stage" -ov -format UDZO dist/FoxyVPN-macOS.dmg; then
+              made=1
+              break
+            fi
+            echo "::warning::hdiutil create failed (attempt $attempt), retrying"
+            hdiutil info || true
+            sleep $((attempt * 5))
+          done
+          if [ "$made" != 1 ]; then
+            echo "::error::hdiutil create failed 5 times"
+            exit 1
+          fi
           hdiutil verify dist/FoxyVPN-macOS.dmg
           ls -la dist
 
