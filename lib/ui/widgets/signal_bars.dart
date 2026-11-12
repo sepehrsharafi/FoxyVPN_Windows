@@ -14,7 +14,7 @@ class PingReadout extends StatelessWidget {
 
   /// What a screen reader says for a ping state.
   static String describe(int? ms, bool measuring) =>
-      ms != null ? '$ms ms' : (measuring ? 'measuring ping' : 'no reply');
+      ms != null ? '$ms ms' : (measuring ? 'measuring ping' : 'unavailable');
 
   @override
   Widget build(BuildContext context) {
@@ -29,7 +29,7 @@ class PingReadout extends StatelessWidget {
         child: CircularProgressIndicator(strokeWidth: 1.5, color: FoxyColors.textFaint, strokeCap: StrokeCap.round),
       );
     } else {
-      figure = Text('No reply', maxLines: 1, style: style.copyWith(color: FoxyColors.textFaint));
+      figure = Text('Unavailable', maxLines: 1, style: style.copyWith(color: FoxyColors.textFaint));
     }
     return Semantics(label: describe(value, measuring), excludeSemantics: true, child: figure);
   }

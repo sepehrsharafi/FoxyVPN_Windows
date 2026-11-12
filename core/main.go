@@ -1,5 +1,5 @@
 // foxy-core: the data plane of FoxyVPN. One process per VPN session; it
-// holds an HTTP/2 connection (TLS with Firefox's ClientHello) to Mozilla's
+// holds a few HTTP/2 connections (TLS with Firefox's ClientHello) to Mozilla's
 // VPN edge (Fastly MASQUE) and carries every TCP and UDP flow of the app as
 // a CONNECT / CONNECT-UDP stream on it. The app talks to us over stdin
 // (token), stdout (events) and a loopback socket (flows); see flows.go.
@@ -33,8 +33,26 @@ func main() {
 	sndbuf := flag.Int("sndbuf", 0, "kernel send buffer in bytes (0 = OS default)")
 	socks := flag.Bool("socks", false, "serve SOCKS5 (CONNECT, UDP ASSOCIATE) on 127.0.0.1")
 	socksPort := flag.Int("socks-port", 0, "SOCKS5 port (0 = any)")
+	conns := flag.Int("conns", 3, "HTTP/2 connections to keep open to the edge (1-8)")
 	testRoot := flag.String("test-root", "", "") // hidden: extra trusted root PEM file, for tests only
+	probe := flag.Bool("probe", false, "probe mode: time one CONNECT per server, print results, exit (see probe.go)")
+	probeConc := flag.Int("concurrency", 4, "probe mode: servers tested in parallel")
+	probeTimeout := flag.Duration("timeout", 5*time.Second, "probe mode: limit per server")
 	flag.Parse()
+
+	if *probe {
+		if net.ParseIP(*ip) == nil {
+			fmt.Fprintln(os.Stderr, "usage: foxy-core --probe --ip IPv4 [--concurrency N] [--timeout 5s]")
+			os.Exit(2)
+		}
+		loadTestRoot(*testRoot)
+		token, servers, ok := readProbeList(bufio.NewReader(os.Stdin))
+		if !ok {
+			os.Exit(0)
+		}
+		runProbe(newEvents(os.Stdout), *ip, *probeConc, *probeTimeout, token, servers)
+		os.Exit(0)
+	}
 
 	host, portS, err := net.SplitHostPort(*server)
 	port, perr := strconv.Atoi(portS)
@@ -42,15 +60,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "usage: foxy-core --server host:port --ip IPv4 [--sndbuf N] [--socks [--socks-port N]]")
 		os.Exit(2)
 	}
-	if *testRoot != "" {
-		if pemBytes, err := os.ReadFile(*testRoot); err == nil {
-			if blk, _ := pem.Decode(pemBytes); blk != nil {
-				if c, err := x509.ParseCertificate(blk.Bytes); err == nil {
-					extraRoots = append(extraRoots, c)
-				}
-			}
-		}
-	}
+	loadTestRoot(*testRoot)
 
 	ev := newEvents(os.Stdout)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -66,6 +76,7 @@ func main() {
 	secret := hex.EncodeToString(b)
 
 	up := newUpstream(host, port, *ip, *sndbuf, ev)
+	up.want = min(max(*conns, 1), 8)
 	f := &flows{up: up, secret: secret, serverAuthority: *server}
 	socksLn, sp := (net.Listener)(nil), 0
 	if *socks {
@@ -96,6 +107,19 @@ func main() {
 	for readToken(in, f) {
 	}
 	os.Exit(0)
+}
+
+func loadTestRoot(path string) {
+	if path == "" {
+		return
+	}
+	if pemBytes, err := os.ReadFile(path); err == nil {
+		if blk, _ := pem.Decode(pemBytes); blk != nil {
+			if c, err := x509.ParseCertificate(blk.Bytes); err == nil {
+				extraRoots = append(extraRoots, c)
+			}
+		}
+	}
 }
 
 // readToken reads one {"token":"..."} line. false on EOF. The token is never

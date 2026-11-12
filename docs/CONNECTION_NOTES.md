@@ -1,6 +1,6 @@
 # Connection notes: what we found, what we built, what is left
 
-State as of 2026-11-10 (commit `1a6f368`). Read this before touching the VPN data path.
+State as of 2026-11-12 (version 1.0.9). Read this before touching the VPN data path.
 
 ## TL;DR
 
@@ -89,6 +89,40 @@ Android: apps -> VpnService TUN -> hev-socks5-tunnel -> 127.0.0.1:<engine socks 
   `applicationInfo.nativeLibraryDir`. That needs `useLegacyPackaging = true` in
   `android/app/build.gradle.kts`. The app's own UID is excluded from the VPN, so the engine's
   sockets bypass the tunnel.
+
+### Probe mode: the "real delay" of the Locations page (`core/probe.go`, `lib/tunnel/location_probe.dart`)
+
+Every location sits behind the same nearby Fastly edge, so a TCP connect time says nothing about
+a location (dead exits looked great). The Locations page now shows the time of one real request
+through each location's exit, like v2rayN.
+
+- **Arguments:** `foxy-core --probe --ip <edge IPv4> [--concurrency 4] [--timeout 5s]`
+  (`--timeout` is per server and includes the TLS dial).
+- **stdin:** `{"token":"..."}` then one `{"probe":["host:port", ...]}` line. EOF before both lines: exit.
+- **stdout:** per server `{"type":"probe","server":"host:port","ms":123}` or
+  `{"type":"probe","server":"...","error":"timeout|auth|<short>"}` (`auth` = 401/403/407 or
+  `x-fastly-proxy-auth-failed`), then `{"type":"probe_done"}`, then the process exits.
+- **What is measured:** per server a fresh TLS connection (Firefox hello, SNI = that host) to the
+  pinned IP, HTTP/2, one `CONNECT cp.cloudflare.com:80` (same request shape as flows), then
+  `GET /generate_204`. The time is CONNECT sent -> HTTP status line (204 or 200) received. The TLS
+  handshake to the edge is excluded (same for every location). The connection is closed right after.
+  At most `--concurrency` servers run at once. The token is never logged.
+- **Dart side (`VpnController`):**
+  - A round runs at startup (after the account check), when the Locations page opens with delays
+    older than 5 min, and on refresh. One round at a time. Results show as they arrive. A failed
+    location shows "Unavailable".
+  - Recommended on connect uses the cache if it is under 5 min old; otherwise one round, waited for
+    at most 8 s (best answer so far), then Mozilla's pick if nothing answered.
+  - **Token:** no new control-plane traffic. The probe reuses a pass the app already holds: the one
+    from the startup / sign-in account check (`_checkAccount`), the running `VpnSession`'s token
+    while connected, or the last session's token after a disconnect. A pass is never fetched for
+    the probe.
+  - **Edge IP:** connected -> `VpnSession.upstreamAddress` (only the pinned IP has a bypass route).
+    Disconnected -> resolved like connect does (`UpstreamSession.resolveIPv4` of the first
+    server's host).
+  - **Fallback:** no engine (macOS), no usable pass, the probe failing at once, or the edge
+    rejecting the pass for every location -> the old TCP ping, and the page says "Connection time
+    only". While connected, a TCP-only round is not run (it would go through the tunnel).
 
 ## Build and CI
 
@@ -209,28 +243,32 @@ Android: apps -> VpnService TUN -> hev-socks5-tunnel -> 127.0.0.1:<engine socks 
 - Use an edge IP from the current log (`Connected via ...`). While the VPN is on, only the
   pinned IP has a bypass route.
 
+## Done in 1.0.9 (2026-11-12)
+
+- **Connection pool:** the engine keeps 3 HTTP/2 connections (`--conns`, default 3, 1–8) and
+  puts each new flow on the least busy one. Losing one of them is not `lost`; it is redialed
+  in the background (a failed extra dial waits 10 s). `core/upstream.go`.
+- **Real delay instead of ping** on the Locations page and for Recommended (see "Probe mode").
+  It measures latency through each exit, not throughput. Not yet seen working against the real
+  edge (the dev PC's traffic goes through another TUN at 198.18.0.1): check the app log on a
+  real device after the first round.
+- **`auth_failed`** inside its 5 s window is now queued and sent when the window ends.
+- **Half-closed streams** (client sent FIN) are cancelled after 5 min without a download byte.
+- Decided against: upload rate cap (user's call); HTTP/3 left for later.
+
 ## Open items / ideas (not started, in priority order)
 
-1. **Several HTTP/2 connections in the engine.** Spread flows over 2–4 connections. On this
-   lossy line 4 connections gave 0.88 vs 0.52 MB/s. About a day, inside `core/upstream.go`.
-2. **Pick locations by measured throughput, not ping.**
-   - Every location is reached through the same nearby Fastly edge (23.235.42.x), so ping
-     barely differs.
-   - Exit speed differs by country, which is why some locations are slow.
-3. **HTTP/3 (QUIC) as an experiment.** quic-go is MIT; the edge port is 2499. Unproven on this
+1. **HTTP/3 (QUIC) as an experiment.** quic-go is MIT; the edge port is 2499. Unproven on this
    line.
-4. **Upload rate cap** a bit below the line's uplink, to keep pages responsive while uploading
-   (bufferbloat at the modem).
-5. **Android on a real phone.** Not verified that hev-socks5-tunnel works with the engine's
-   SOCKS port (CI builds pass, unit tests pass). If it fails, the app falls back to the Dart path.
-6. **macOS:** still on the Dart path, and CI is paused for it. When resumed, ship foxy-core in
+2. **Engine SOCKS port after a crash:** if `--socks-port` cannot be re-bound, the reconnect
+   fails (logged `Engine SOCKS port changed`). Following the new port means restarting
+   tun2socks/hev and the Wintun setup; judged too risky for now.
+3. **macOS:** still on the Dart path, and CI is paused for it. When resumed, ship foxy-core in
    the app bundle (darwin arm64/amd64) and enable the engine SOCKS path for macOS in
    `VpnSession.engineSocksPlatform`.
-7. **Minor engine notes:**
-   - A half-closed stream lives until the edge or the client ends it.
-   - `auth_failed` inside its 5 s window is dropped, not queued.
-   - If `--socks-port` cannot be re-bound after an engine crash, tun2socks keeps the old port.
-     This is logged as `Engine SOCKS port changed`.
-8. **Licensing:**
+4. **Licensing:**
    - FoxyVPN is MIT. The engine uses only BSD/MIT deps (x/net, uTLS, Go stdlib).
    - Arman's code is GPL-3.0. Do not copy from it; reading it for ideas is fine.
+   - Mozilla VPN's client (mozilla-mobile/mozilla-vpn-client) is MPL-2.0. Its server scoring
+     (`src/serverlatency.cpp`: ICMP ping of WireGuard servers, 8 parallel, every 30 min, cooldown
+     after failures) was read for ideas only.

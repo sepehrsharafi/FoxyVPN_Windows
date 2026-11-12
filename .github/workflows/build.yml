@@ -218,7 +218,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
 
-          # The pubspec version, without the +build part: 0.1.0+1 -> 0.1.0
+          # The pubspec version, without the +build part: 1.0.9+10 -> 1.0.9
           $line = Select-String -Path pubspec.yaml -Pattern '^version:' | Select-Object -First 1
           if (-not $line -or -not ($line.Line -match '^version:\s*(\d+\.\d+\.\d+)(\+\S*)?\s*$')) {
             throw "Cannot read a x.y.z version from pubspec.yaml (found: $($line.Line))"

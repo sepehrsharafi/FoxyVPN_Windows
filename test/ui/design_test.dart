@@ -278,7 +278,7 @@ void main() {
       );
     });
 
-    testWidgets('the location row always has the ping: bars and "NN ms" before "Change", "No reply", or a spinner', (
+    testWidgets('the location row always has the ping: bars and "NN ms" before "Change", "Unavailable", or a spinner', (
       tester,
     ) async {
       final c = FakeVpnController();
@@ -297,7 +297,7 @@ void main() {
 
       c.update((c) => c.setPing(berlin, null));
       await pumpFor(tester);
-      expect(find.text('No reply'), findsOneWidget);
+      expect(find.text('Unavailable'), findsOneWidget);
       expect(find.text('—'), findsNWidgets(2), reason: 'only the two idle speed tiles use a dash');
 
       c.update((c) => c.setPinging(berlin, true));

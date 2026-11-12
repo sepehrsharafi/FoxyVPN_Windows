@@ -213,6 +213,16 @@ func (e *testEdge) goaway(debug string) {
 	}
 }
 
+// killOne drops the oldest live connection.
+func (e *testEdge) killOne() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if len(e.conns) > 0 {
+		e.conns[0].Close()
+		e.conns = e.conns[1:]
+	}
+}
+
 func (e *testEdge) killConns() {
 	e.mu.Lock()
 	defer e.mu.Unlock()

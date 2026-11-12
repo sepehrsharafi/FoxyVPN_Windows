@@ -27,6 +27,7 @@ import 'servers.dart';
 import 'settings_store.dart';
 import 'tunnel/conflicts.dart';
 import 'tunnel/exit_check.dart';
+import 'tunnel/location_probe.dart';
 import 'tunnel/speed_meter.dart';
 import 'tunnel/vpn_session.dart';
 import 'tunnel/windows_tun.dart';
@@ -74,6 +75,7 @@ class VpnController extends ChangeNotifier {
     Future<void> Function()? cleanup,
     Future<List<Location>> Function()? loadLocations,
     Future<int?> Function(ServerNode node)? ping,
+    LocationProbe? probe,
     Future<List<String>> Function()? detectConflicts,
     SessionStarter? startSession,
     TunStarter? startTun,
@@ -82,10 +84,9 @@ class VpnController extends ChangeNotifier {
     AndroidBridge? androidBridge,
     this.cancelWait = connectCancelWait,
     this.exitCheckDelay = const Duration(seconds: 2),
-    this.quickConnectTimeout = const Duration(seconds: 6),
-    this.recommendedPingCutoff = const Duration(milliseconds: 700),
-    this.recommendedPingMax = const Duration(seconds: 3),
-    this.locationsMaxAge = const Duration(minutes: 2),
+    this.quickConnectTimeout = const Duration(seconds: 8),
+    this.recommendedPingMax = const Duration(seconds: 8),
+    this.locationsMaxAge = const Duration(minutes: 5),
     this.statsInterval = const Duration(seconds: 1),
     DateTime Function()? clock,
   }) : _clock = clock ?? DateTime.now,
@@ -94,6 +95,7 @@ class VpnController extends ChangeNotifier {
        _cleanup = cleanup ?? _defaultCleanup,
        _loadLocations = loadLocations ?? fetchLocations,
        _ping = ping ?? pingMs,
+       _probe = probe ?? LocationProbe(),
        _detectConflicts = detectConflicts ?? ConflictDetector.detect,
        _startSession = startSession ?? VpnSession.start,
        _startTun = startBackend ?? _wrapWindows(startTun) ?? startPlatformTun,
@@ -130,7 +132,8 @@ class VpnController extends ChangeNotifier {
   final SettingsStore _settings;
   final Future<void> Function() _cleanup;
   final Future<List<Location>> Function() _loadLocations;
-  final Future<int?> Function(ServerNode node) _ping;
+  final Future<int?> Function(ServerNode node) _ping; // TCP connect time: the fallback of the real-delay probe
+  final LocationProbe _probe;
   final Future<List<String>> Function() _detectConflicts;
   final SessionStarter _startSession;
   final TunBackendStarter _startTun;
@@ -152,15 +155,13 @@ class VpnController extends ChangeNotifier {
   /// and pings before it picks from what it has.
   final Duration quickConnectTimeout;
 
-  /// Connecting with Recommended pings every location again and waits this long
-  /// at most: a location slower than this would not be picked anyway. If none
-  /// has answered by then, the first answer is taken.
-  final Duration recommendedPingCutoff;
-
-  /// The longest Connect waits for any ping to answer before it uses Mozilla's pick.
+  /// Connecting with Recommended uses the measured delays while they are fresh
+  /// ([locationsMaxAge]); otherwise it runs one round and waits at most this long
+  /// for it, then takes the best answer so far (Mozilla's pick if none came).
   final Duration recommendedPingMax;
 
-  /// Quick connect measures again if the pings are older than this.
+  /// How long measured delays count as fresh (the cache): Recommended, quick
+  /// connect and opening the Locations page measure again only after this.
   final Duration locationsMaxAge;
 
   /// Tick of the live stats (speed sampling and UI refresh).
@@ -188,7 +189,13 @@ class VpnController extends ChangeNotifier {
   bool _loadingLocations = false;
   String? _locationsError;
   Future<void>? _loadFuture;
-  Future<void>? _pingFuture; // the pings of the current list
+  Future<void>? _pingFuture; // the measuring round of the current list
+  final Map<Location, int?> _roundPings = {}; // answers of the current / last round only
+  bool _delaysMeasured = false; // a round of the current list has finished
+  bool _probedDelays = false; // ... and it measured real delays (not TCP connect times)
+  Future<void>? _accountCheck; // the pass fetch that gives the probe its token
+  String? _probeToken; // a pass the app already has; the probe never fetches one
+  DateTime? _probeTokenUntil;
   DateTime? _locationsAt; // when the current list was loaded (and pinged)
   int _generation = 0; // invalidates pings of an older list
   String? _selectedKey;
@@ -235,7 +242,8 @@ class VpnController extends ChangeNotifier {
         });
     _listenToAndroid();
     _syncTile();
-    await Future.wait([cleanup, _load(), _checkAccount(), refreshConflicts()]);
+    _accountCheck = _checkAccount();
+    await Future.wait([cleanup, _load(), _accountCheck!, refreshConflicts()]);
     // Android may have started the VPN service itself (Always-on VPN) while the
     // app was not running; connect now that the account and locations are loaded.
     final android = _android;
@@ -446,7 +454,8 @@ class VpnController extends ChangeNotifier {
     _accountError = null;
     _settings.setEmail(email);
     _notify();
-    unawaited(_checkAccount());
+    final check = _accountCheck = _checkAccount();
+    unawaited(check);
   }
 
   /// Throws [StateError] while a connection exists or is being set up or torn down.
@@ -456,6 +465,8 @@ class VpnController extends ChangeNotifier {
       throw StateError('Disconnect before signing out.');
     }
     _account.signOut();
+    _probeToken = null;
+    _probeTokenUntil = null;
     _settings.setEmail(null);
     _pendingEmail = null;
     _signedIn = false;
@@ -481,6 +492,7 @@ class VpnController extends ChangeNotifier {
     try {
       final pass = await _account.proxyPass();
       if (!_signedIn) return; // signed out meanwhile
+      _rememberToken(pass.token, pass.expiresAt);
       _passQuotaRemaining = pass.quotaRemaining;
       _passQuotaMax = pass.quotaMax;
       _passQuotaResetsAt = pass.quotaResetsAt;
@@ -674,6 +686,7 @@ class VpnController extends ChangeNotifier {
       _pings.clear();
       _pinging.clear();
       _sortedCache = null;
+      _delaysMeasured = false;
       _loadingLocations = false;
       _locationsAt = _clock();
       _resolveSelected();
@@ -689,12 +702,111 @@ class VpnController extends ChangeNotifier {
     }
   }
 
+  /// Measures every location: the real delay through the probe where there is an
+  /// engine and a pass the app already holds, else the TCP connect time. Replies
+  /// show as they come; the order moves once, when the round is done.
   Future<void> _pingAll() async {
     final generation = _generation;
     final batch = [..._locations];
+    _roundPings.clear();
     _pinging.addAll(batch);
     _sortedCache = null; // the order now holds still until the round is done
     _notify();
+    var probed = false;
+    try {
+      probed = await _probeRound(batch, generation);
+    } catch (e) {
+      AppLog.write('Location probe failed: $e');
+    }
+    if (_disposed || generation != _generation) return;
+    if (!probed) await _tcpRound(batch, generation);
+    if (_disposed || generation != _generation) return;
+    _probedDelays = probed;
+    _delaysMeasured = true;
+    _locationsAt = _clock(); // the cache is fresh from here
+    _pinging.clear();
+    _sortedCache = null; // every reply is in: one reorder
+    _notify();
+  }
+
+  void _setDelay(Location l, int? ms) {
+    _pings[l] = ms;
+    _roundPings[l] = ms;
+    _pinging.remove(l);
+  }
+
+  /// A pass the app already has: it is never fetched for the probe (that would add
+  /// control-plane traffic). The pass of the account check at startup / sign-in
+  /// and the last one of a session are remembered.
+  void _rememberToken(String token, DateTime? expiresAt) {
+    if (token.isEmpty) return;
+    _probeToken = token;
+    // Unknown expiry: assume a short life. Two minutes of margin either way.
+    _probeTokenUntil = expiresAt?.subtract(const Duration(minutes: 2)) ?? _clock().add(const Duration(minutes: 8));
+  }
+
+  ({String token, InternetAddress? ip})? _probeCredentials() {
+    final s = _session;
+    if (s != null) {
+      final until = s.tokenExpiresAt;
+      if (s.token.isEmpty || (until != null && !until.isAfter(_clock().add(const Duration(minutes: 2))))) return null;
+      // Connected: only the pinned edge IP has a route around the tunnel.
+      return (token: s.token, ip: s.upstreamAddress);
+    }
+    if (_tunStarting) return null;
+    final token = _probeToken;
+    final until = _probeTokenUntil;
+    if (token == null || until == null || !until.isAfter(_clock())) return null;
+    return (token: token, ip: null);
+  }
+
+  /// The real-delay round. False means it did not run (no engine, no usable pass,
+  /// every answer was an auth failure, or it died at once) and the caller falls
+  /// back to the TCP ping. True also when the round was abandoned.
+  Future<bool> _probeRound(List<Location> batch, int generation) async {
+    if (!await _probe.isAvailable()) return false;
+    // The startup account check gives the pass; it never throws.
+    final pending = _accountCheck;
+    if (pending != null && _session == null) await pending.timeout(const Duration(seconds: 10), onTimeout: () {});
+    if (_disposed || generation != _generation) return true;
+    final credentials = _probeCredentials();
+    if (credentials == null) return false;
+    final byServer = <String, List<Location>>{};
+    for (final l in batch) {
+      final s = l.servers.first;
+      byServer.putIfAbsent('${s.host}:${s.port}', () => []).add(l);
+    }
+    var answered = 0;
+    var authFailures = 0;
+    try {
+      await _probe.run(
+        servers: byServer.keys.toList(),
+        token: credentials.token,
+        ip: credentials.ip,
+        onResult: (server, result) {
+          answered++;
+          if (result.authFailed) authFailures++;
+          if (_disposed || generation != _generation) return;
+          for (final l in byServer[server] ?? const <Location>[]) {
+            _setDelay(l, result.ms);
+          }
+          _notifySoon();
+        },
+      );
+    } catch (e) {
+      AppLog.write('Location probe: $e');
+      if (answered == 0) return false;
+    }
+    if (answered > 0 && authFailures == answered) {
+      AppLog.write('Location probe: the edge rejected the pass; using the TCP ping');
+      _probeToken = null;
+      _probeTokenUntil = null;
+      return false;
+    }
+    return true;
+  }
+
+  Future<void> _tcpRound(List<Location> batch, int generation) async {
     await Future.wait(
       batch.map((location) async {
         int? ms;
@@ -705,15 +817,49 @@ class VpnController extends ChangeNotifier {
         // A ping that finishes after the tunnel came up went through the tunnel and
         // means nothing: keep the value measured before connecting (if any).
         final throughTunnel = _session != null || _tunStarting;
-        if (!throughTunnel) _pings[location] = ms;
-        _pinging.remove(location);
+        if (!throughTunnel) {
+          _setDelay(location, ms);
+        } else {
+          _pinging.remove(location);
+        }
         _notifySoon();
       }),
     );
-    if (_disposed || generation != _generation) return;
-    _sortedCache = null; // every reply is in: one reorder
-    _notify();
   }
+
+  /// Starts a measuring round of the current list (or joins the one running).
+  Future<void> _ensureRound() {
+    final running = _pingFuture;
+    if (running != null && _pinging.isNotEmpty) return running;
+    if (_locations.isEmpty) return Future.value();
+    _orderPings = {for (final e in _pings.entries) locationKey(e.key): e.value};
+    final round = _pingFuture = _pingAll();
+    return round;
+  }
+
+  /// Measures the delays again, without reloading the list. While a VPN is up
+  /// only if the last round could probe (a TCP ping through the tunnel means
+  /// nothing); never while connecting or disconnecting.
+  Future<void> refreshDelays() {
+    final s = state;
+    if (s == ConnState.connecting || s == ConnState.disconnecting) return Future.value();
+    if (_session != null && !_probedDelays) return Future.value();
+    final loading = _loadFuture;
+    if (_loadingLocations && loading != null) return loading;
+    return _ensureRound();
+  }
+
+  /// The Locations page opened: measures again if the delays are older than
+  /// [locationsMaxAge] (or never were measured).
+  Future<void> refreshDelaysIfStale() {
+    final at = _locationsAt;
+    if (_delaysMeasured && at != null && _clock().difference(at) <= locationsMaxAge) return Future.value();
+    return refreshDelays();
+  }
+
+  /// The last round could only measure TCP connect times (no engine, or no pass
+  /// to probe with): the numbers say little, and the Locations page says so.
+  bool get delaysAreEstimates => _delaysMeasured && !_probedDelays && _pinging.isEmpty;
 
   /// Persisted by country + city code; defaults to Recommended.
   Location? get selected => _selected;
@@ -999,70 +1145,48 @@ class VpnController extends ChangeNotifier {
     return _selected;
   }
 
-  /// Pings every real location now and gives the fastest of the answers that
-  /// came within [recommendedPingCutoff] (when none had come by then, the first
-  /// one after it). [fallback] (Recommended: Mozilla's own pick) when nothing
-  /// answers. Old pings are not used: the connection may have stopped working
-  /// because the old fastest location got slow. The answers show in the list too.
+  /// The location Recommended connects to: the lowest real delay, from the cache
+  /// while it is fresh ([locationsMaxAge]), otherwise from one round that is
+  /// waited for at most [recommendedPingMax] (the best answer so far then).
+  /// [fallback] (Recommended: Mozilla's own pick) when nothing answered.
   Future<Location> _measureFastest({required Location fallback}) async {
-    final batch = [for (final l in _locations) if (!l.isRecommended) l];
-    if (batch.isEmpty) return fallback;
-    final answers = <Location, int>{};
-    final enough = Completer<void>();
-    var waiting = batch.length;
-    var cutoffPassed = false;
-    void check() {
-      if (enough.isCompleted) return;
-      if (waiting == 0 || (cutoffPassed && answers.isNotEmpty)) enough.complete();
-    }
-
-    final cutoff = Timer(recommendedPingCutoff, () {
-      cutoffPassed = true;
-      check();
-    });
-    final giveUp = Timer(recommendedPingMax, () {
-      if (!enough.isCompleted) enough.complete();
-    });
-    _pinging.addAll(batch);
-    _notify();
-    for (final location in batch) {
-      unawaited(() async {
-        int? ms;
-        try {
-          ms = await _ping(location.servers.first);
-        } catch (_) {}
-        waiting--;
-        if (!_disposed) {
-          // A late reply that came after the tunnel went up means nothing.
-          if (_session == null && !_tunStarting) _pings[location] = ms;
-          _pinging.remove(location);
-          _sortedCache = null;
-          _notifySoon();
-        }
-        if (ms != null && !enough.isCompleted) answers[location] = ms;
-        check();
-      }());
-    }
-    await enough.future;
-    cutoff.cancel();
-    giveUp.cancel();
+    if (_locations.every((l) => l.isRecommended)) return fallback;
+    final at = _locationsAt;
+    final fresh = _delaysMeasured && at != null && _clock().difference(at) <= locationsMaxAge;
     Location? best;
-    for (final e in answers.entries) {
-      if (best == null || e.value < answers[best]!) best = e.key;
+    var detail = 'cached';
+    if (fresh && fastestLocation != null) {
+      best = fastestLocation;
+    } else {
+      try {
+        await _ensureRound().timeout(recommendedPingMax);
+        detail = 'measured';
+      } on TimeoutException {
+        detail = 'best so far';
+      } catch (_) {}
+      int? bestMs;
+      for (final e in _roundPings.entries) {
+        final ms = e.value;
+        if (e.key.isRecommended || ms == null) continue;
+        if (bestMs == null || ms < bestMs) {
+          best = e.key;
+          bestMs = ms;
+        }
+      }
     }
     if (best == null) {
-      AppLog.write('Recommended: no location answered a ping; using Mozilla\'s pick');
+      AppLog.write('Recommended: no location answered; using Mozilla\'s pick');
       return fallback;
     }
-    AppLog.write('Recommended: ${best.label} (${answers[best]} ms, ${answers.length} of ${batch.length} answered in time)');
+    AppLog.write('Recommended: ${best.label} (${_pings[best] ?? _roundPings[best]} ms, $detail)');
     return best;
   }
 
   Future<void> connect() {
     final selected = _selected;
     if (selected == null || state != ConnState.idle || _shuttingDown) return Future.value();
-    // Recommended = the fastest location right now: _doConnect pings them all
-    // again first. A location picked by hand is connected to as it is.
+    // Recommended = the fastest location by real delay: _doConnect uses the
+    // measured delays while fresh, else measures once. A location picked by hand is connected to as it is.
     final future = _doConnect(selected, pickFastest: selected.isRecommended);
     _connectFuture = future;
     return future.whenComplete(() {
@@ -1213,6 +1337,7 @@ class VpnController extends ChangeNotifier {
     // Already disconnected (e.g. the tunnel and the session both reported the drop).
     if (session == null && tun == null && error != null) return;
     _keepQuota(session);
+    if (session != null) _rememberToken(session.token, session.tokenExpiresAt);
     _session = null;
     _tun = null;
     _connectedLocation = null;

@@ -9,6 +9,7 @@ import 'package:foxyvpn/guardian.dart';
 import 'package:foxyvpn/http_util.dart';
 import 'package:foxyvpn/servers.dart';
 import 'package:foxyvpn/settings_store.dart';
+import 'package:foxyvpn/tunnel/location_probe.dart';
 import 'package:foxyvpn/tunnel/vpn_session.dart';
 import 'package:foxyvpn/tunnel/windows_tun.dart';
 import 'package:foxyvpn/vpn_controller.dart';
@@ -60,6 +61,12 @@ class _FakeSession implements VpnSession {
 
   @override
   InternetAddress get upstreamAddress => InternetAddress('203.0.113.9');
+
+  @override
+  String get token => 'tok';
+
+  @override
+  DateTime? get tokenExpiresAt => null;
 
   VpnPhase phase = VpnPhase.connected;
   final _phaseChanges = StreamController<VpnPhase>.broadcast(sync: true);
@@ -326,6 +333,7 @@ void main() {
 
     round = 1;
     await c.refreshLocations(); // the list is in; its pings now wait
+    await pumpEventQueue(); // the round first looks for a probe, then falls back to TCP
     expect(c.pingingLocations, isTrue);
     expect(c.locations, [rec, paris, berlin, tokyo], reason: 'the previous order while measuring');
 
@@ -929,12 +937,13 @@ void main() {
     });
   });
 
-  group('Recommended measures again on every connect', () {
+  group('Recommended uses the measured delays', () {
     late List<String> connectedTo;
     late Map<String, ({int? ms, Duration after})> replies;
     late int pingCalls;
+    late DateTime now;
 
-    VpnController build({Duration cutoff = const Duration(milliseconds: 100)}) => VpnController(
+    VpnController build({Duration max = const Duration(seconds: 2)}) => VpnController(
       account: account,
       settings: settings,
       cleanup: () async {},
@@ -964,13 +973,14 @@ void main() {
             List<InternetAddress> extraBypass = const [],
             void Function(String)? log,
           }) async => _FakeTun([]),
-      recommendedPingCutoff: cutoff,
-      recommendedPingMax: const Duration(seconds: 2),
+      recommendedPingMax: max,
+      clock: () => now,
     );
 
     setUp(() {
       connectedTo = [];
       pingCalls = 0;
+      now = DateTime(2030, 1, 1, 12);
       replies = {
         'ber': (ms: 80, after: Duration.zero),
         'par': (ms: 30, after: Duration.zero),
@@ -978,52 +988,58 @@ void main() {
       };
     });
 
-    test('a reconnect pings again and goes to the location that is fastest now', () async {
+    test('a reconnect within five minutes uses the cached delays', () async {
       final c = build();
       await c.init();
       await c.connect();
       expect(connectedTo, ['par']);
       await c.disconnect();
+      final before = pingCalls;
 
-      // Paris got slow meanwhile: the old pings would still say Paris.
+      // Paris got slow, but the cache is fresh: no new round.
       replies['par'] = (ms: 400, after: Duration.zero);
+      now = now.add(const Duration(minutes: 4));
       await c.connect();
-      expect(connectedTo, ['par', 'ber']);
-      expect(c.selected!.isRecommended, isTrue, reason: 'the choice stays Recommended');
-      expect(c.pingOf(berlin), 80, reason: 'the new pings show in the list');
+      expect(connectedTo, ['par', 'par']);
+      expect(pingCalls, before);
       await c.shutdown();
     });
 
-    test('a location picked by hand is connected to without pinging', () async {
+    test('with delays older than five minutes one round runs and the fastest now wins', () async {
       final c = build();
       await c.init();
-      await Future<void>.delayed(const Duration(milliseconds: 20)); // the startup pings are done
+      await c.connect();
+      await c.disconnect();
+
+      replies['par'] = (ms: 400, after: Duration.zero);
+      now = now.add(const Duration(minutes: 6));
+      await c.connect();
+      expect(connectedTo, ['par', 'ber']);
+      expect(c.selected!.isRecommended, isTrue, reason: 'the choice stays Recommended');
+      expect(c.pingOf(berlin), 80, reason: 'the new delays show in the list');
+      await c.shutdown();
+    });
+
+    test('a location picked by hand is connected to without measuring', () async {
+      final c = build();
+      await c.init();
+      await Future<void>.delayed(const Duration(milliseconds: 20)); // the startup round is done
       await c.select(tokyo);
       final before = pingCalls;
+      now = now.add(const Duration(minutes: 30));
       await c.connect();
       expect(connectedTo, ['tyo']);
       expect(pingCalls, before);
       await c.shutdown();
     });
 
-    test('slow locations are not waited for past the cutoff', () async {
-      final c = build();
+    test('slow locations are not waited for past the cap: the best answer so far wins', () async {
+      final c = build(max: const Duration(milliseconds: 300));
       await c.init();
-      // Tokyo would win, but answers long after the cutoff.
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      now = now.add(const Duration(minutes: 6));
+      // Tokyo would win, but answers long after the cap.
       replies['tyo'] = (ms: 5, after: const Duration(milliseconds: 1500));
-      final watch = Stopwatch()..start();
-      await c.connect();
-      expect(connectedTo, ['par']);
-      expect(watch.elapsedMilliseconds, lessThan(1000));
-      await c.shutdown();
-    });
-
-    test('with no answer by the cutoff, the first answer after it is taken', () async {
-      final c = build();
-      await c.init();
-      replies
-        ..['par'] = (ms: 300, after: const Duration(milliseconds: 300))
-        ..['ber'] = (ms: 250, after: const Duration(milliseconds: 1200));
       final watch = Stopwatch()..start();
       await c.connect();
       expect(connectedTo, ['par']);
@@ -1034,10 +1050,276 @@ void main() {
     test('with no answer at all, Recommended (Mozilla\'s pick) is used', () async {
       final c = build();
       await c.init();
+      await Future<void>.delayed(const Duration(milliseconds: 20));
       replies = {};
+      now = now.add(const Duration(minutes: 6));
       await c.connect();
       expect(connectedTo, ['rec']);
       await c.shutdown();
     });
   });
+
+  group('real delay (the probe)', () {
+    late FakeProbe probe;
+    late int tcpPings;
+    late DateTime now;
+    late List<String> connectedTo;
+
+    VpnController build({Duration? max}) => VpnController(
+      account: account,
+      settings: settings,
+      cleanup: () async {},
+      loadLocations: () async => [tokyo, berlin, rec, paris],
+      ping: (node) async {
+        tcpPings++;
+        return pings[node.host];
+      },
+      probe: probe,
+      detectConflicts: () async => const [],
+      startSession:
+          ({
+            required Account account,
+            required Location location,
+            void Function(String message)? log,
+            Future<void> Function()? beforeReconnect,
+            bool directFallback = false,
+          }) async {
+            connectedTo.add(location.cityCode);
+            return _FakeSession([]);
+          },
+      startTun:
+          ({
+            required int socksPort,
+            required InternetAddress bypass,
+            List<InternetAddress> extraBypass = const [],
+            void Function(String)? log,
+          }) async => _FakeTun([]),
+      recommendedPingMax: max ?? const Duration(seconds: 8),
+      clock: () => now,
+    );
+
+    setUp(() {
+      probe = FakeProbe({
+        'ber.example.com:443': const ProbeResult.ok(120),
+        'par.example.com:443': const ProbeResult.ok(60),
+        'tyo.example.com:443': const ProbeResult.failed('timeout'),
+        'rec.example.com:443': const ProbeResult.ok(10),
+      });
+      tcpPings = 0;
+      connectedTo = [];
+      now = DateTime(2030, 1, 1, 12);
+    });
+
+    test('the delays come from the probe with the pass the account check got; no TCP ping, no extra pass', () async {
+      final c = build();
+      await c.init();
+      await pumpEventQueue();
+      expect(probe.runs, 1);
+      expect(probe.tokens.single, 'tok');
+      expect(probe.ips.single, isNull, reason: 'not connected: the probe resolves the edge itself');
+      expect(account.passRequests, 1, reason: 'the probe never fetches a pass');
+      expect(tcpPings, 0);
+      expect(c.pingOf(berlin), 120);
+      expect(c.pingOf(paris), 60);
+      expect(c.pingOf(tokyo), isNull, reason: 'a failed location has no delay (the list says Unavailable)');
+      expect(c.isPinging(tokyo), isFalse);
+      expect(c.delaysAreEstimates, isFalse);
+      expect(c.locations.map((l) => l.countryCode), ['REC', 'FR', 'DE', 'JP']);
+    });
+
+    test('no probe on this platform (no engine): the old TCP ping, flagged as an estimate', () async {
+      probe.available = false;
+      final c = build();
+      await c.init();
+      await pumpEventQueue();
+      expect(probe.runs, 0);
+      expect(c.pingOf(paris), 30);
+      expect(c.delaysAreEstimates, isTrue);
+    });
+
+    test('no pass at hand (the account check failed): the old TCP ping, and no pass fetch for the probe', () async {
+      account.passError = StateError('offline');
+      final c = build();
+      await c.init();
+      await pumpEventQueue();
+      expect(probe.runs, 0);
+      expect(account.passRequests, 1);
+      expect(c.pingOf(paris), 30);
+      expect(c.delaysAreEstimates, isTrue);
+    });
+
+    test('the probe dying at once falls back to the TCP ping', () async {
+      probe.fail = true;
+      final c = build();
+      await c.init();
+      await pumpEventQueue();
+      expect(c.pingOf(paris), 30);
+      expect(c.delaysAreEstimates, isTrue);
+    });
+
+    test('an edge that rejects the pass for every location falls back to the TCP ping and drops the pass', () async {
+      for (final k in probe.answers.keys.toList()) {
+        probe.answers[k] = const ProbeResult.failed('auth');
+      }
+      final c = build();
+      await c.init();
+      await pumpEventQueue();
+      expect(probe.runs, 1);
+      expect(c.pingOf(paris), 30);
+      expect(c.delaysAreEstimates, isTrue);
+      // The rejected pass is not tried again.
+      probe.answers.updateAll((_, _) => const ProbeResult.ok(1));
+      await c.refreshDelays();
+      expect(probe.runs, 1);
+    });
+
+    test('opening the Locations page measures again only when the cache is older than five minutes', () async {
+      final c = build();
+      await c.init();
+      await pumpEventQueue();
+      expect(probe.runs, 1);
+
+      now = now.add(const Duration(minutes: 4, seconds: 50));
+      await c.refreshDelaysIfStale();
+      expect(probe.runs, 1);
+
+      now = now.add(const Duration(minutes: 1));
+      await c.refreshDelaysIfStale();
+      expect(probe.runs, 2);
+    });
+
+    test('a refresh while a round runs joins it: one run at a time', () async {
+      probe.gate = Completer<void>();
+      final c = build();
+      await c.init();
+      await pumpEventQueue();
+      expect(c.pingingLocations, isTrue);
+      final a = c.refreshDelays();
+      final b = c.refreshDelays();
+      probe.gate!.complete();
+      await Future.wait([a, b]);
+      expect(probe.runs, 1);
+      expect(c.pingingLocations, isFalse);
+    });
+
+    test('Recommended connects to the lowest real delay from the cache, without a new round', () async {
+      final c = build();
+      await c.init();
+      await pumpEventQueue();
+      await c.connect();
+      expect(connectedTo, ['par']);
+      expect(probe.runs, 1);
+      await c.shutdown();
+    });
+
+    test('Recommended with stale delays runs one round and takes its best', () async {
+      final c = build();
+      await c.init();
+      await pumpEventQueue();
+      probe.answers['ber.example.com:443'] = const ProbeResult.ok(20);
+      now = now.add(const Duration(minutes: 6));
+      await c.connect();
+      expect(connectedTo, ['ber']);
+      expect(probe.runs, 2);
+      await c.shutdown();
+    });
+
+    test('Recommended waits at most the cap for a round, then takes the best so far', () async {
+      final c = build(max: const Duration(milliseconds: 200));
+      await c.init();
+      await pumpEventQueue();
+      // The next round: Paris answers at once, then it hangs.
+      probe.hangAfter = 1;
+      probe.order = ['par.example.com:443'];
+      probe.gate = Completer<void>();
+      now = now.add(const Duration(minutes: 6));
+      final watch = Stopwatch()..start();
+      await c.connect();
+      expect(connectedTo, ['par']);
+      expect(watch.elapsedMilliseconds, lessThan(1500));
+      probe.gate!.complete();
+      await c.shutdown();
+    });
+
+    test('no probe result at all for Recommended: Mozilla pick', () async {
+      for (final k in probe.answers.keys.toList()) {
+        probe.answers[k] = const ProbeResult.failed('timeout');
+      }
+      final c = build();
+      await c.init();
+      await pumpEventQueue();
+      await c.connect();
+      expect(connectedTo, ['rec']);
+      await c.shutdown();
+    });
+
+    test('connected: the probe reuses the session pass and the pinned edge IP', () async {
+      final c = build();
+      await c.init();
+      await pumpEventQueue();
+      await c.connect();
+      expect(c.state, ConnState.connected);
+      probe.answers['ber.example.com:443'] = const ProbeResult.ok(15);
+      await c.refreshDelays();
+      expect(probe.runs, 2);
+      expect(probe.tokens.last, 'tok');
+      expect(probe.ips.last, InternetAddress('203.0.113.9'));
+      expect(c.pingOf(berlin), 15);
+      await c.shutdown();
+    });
+
+    test('connected with TCP-only delays: nothing is measured (a TCP ping through the tunnel means nothing)', () async {
+      probe.available = false;
+      final c = build();
+      await c.init();
+      await pumpEventQueue();
+      await c.connect();
+      final before = tcpPings;
+      await c.refreshDelays();
+      expect(tcpPings, before);
+      await c.shutdown();
+    });
+  });
+}
+
+class FakeProbe extends LocationProbe {
+  FakeProbe(this.answers);
+
+  final Map<String, ProbeResult> answers;
+  bool available = true;
+  bool fail = false;
+  Completer<void>? gate; // the run waits for it before it ends
+  int hangAfter = -1; // answer this many servers (in [order]), then wait for the gate
+  List<String> order = const [];
+  int runs = 0;
+  final tokens = <String>[];
+  final ips = <InternetAddress?>[];
+
+  @override
+  Future<bool> isAvailable() async => available;
+
+  @override
+  Future<void> run({
+    required List<String> servers,
+    required String token,
+    InternetAddress? ip,
+    required void Function(String server, ProbeResult result) onResult,
+  }) async {
+    runs++;
+    tokens.add(token);
+    ips.add(ip);
+    if (fail) throw const SocketException('probe failed');
+    if (hangAfter >= 0) {
+      for (final s in order.take(hangAfter)) {
+        onResult(s, answers[s]!);
+      }
+      await gate!.future;
+      return;
+    }
+    final g = gate;
+    if (g != null) await g.future;
+    for (final s in servers) {
+      onResult(s, answers[s] ?? const ProbeResult.failed('no answer'));
+    }
+  }
 }

@@ -37,7 +37,7 @@ void main() {
     expect(find.text('Open log'), findsOneWidget);
     expect(find.text('Licenses'), findsOneWidget);
     expect(find.text('Sign out'), findsOneWidget);
-    expect(find.text('Version 0.1.0'), findsOneWidget);
+    expect(find.text('Version 1.0.9'), findsOneWidget);
     expect(find.text('Disconnect first to sign out.'), findsNothing);
     expect(tester.takeException(), isNull);
 
@@ -185,7 +185,7 @@ void main() {
       await tester.ensureVisible(find.text('Sign out'));
       await tester.pump();
       expect(tester.takeException(), isNull);
-      await tester.ensureVisible(find.text('Version 0.1.0'));
+      await tester.ensureVisible(find.text('Version 1.0.9'));
       await tester.pump();
       expect(tester.takeException(), isNull);
     });

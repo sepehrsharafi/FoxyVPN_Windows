@@ -17,7 +17,7 @@ import '../widgets/page_header.dart';
 import '../widgets/pressable.dart';
 import 'log_screen.dart';
 
-const kAppVersion = '0.1.0';
+const kAppVersion = '1.0.9';
 
 /// Who is signed in, how much data is left, and the odds and ends.
 class AccountScreen extends StatefulWidget {

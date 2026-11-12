@@ -16,15 +16,24 @@ const (
 	redialMax = 15 * time.Second
 )
 
-// upstream is the pool of HTTP/2 connections to the edge. All flows share
-// one connection while it can take new streams. When the edge sends GOAWAY
-// (rotation), or the connection is full or dead, the next flow dials a new
-// connection, and old ones keep serving their streams until they finish.
+// extraRetry is how long a failed dial holds off topping the pool up again.
+// Only extra connections wait for it: with none usable, flows dial at once.
+const extraRetry = 10 * time.Second
+
+// upstream is the pool of HTTP/2 connections to the edge. It keeps up to
+// want connections open and puts each new flow on the least busy one, so a
+// lost packet on one TCP connection stalls only its share of the flows.
+// When the edge sends GOAWAY (rotation), or a connection is full or dead,
+// a new one is dialed, and old ones keep serving their streams until they
+// finish.
 type upstream struct {
 	ip, host string
 	port     int
 	ev       *events
 	tr       *http2.Transport
+
+	// want is the number of connections to keep open (at least 1).
+	want int
 
 	// dialFn makes one TLS connection. Replaced in tests.
 	dialFn func(ctx context.Context) (net.Conn, string, error)
@@ -32,6 +41,7 @@ type upstream struct {
 	mu       sync.Mutex
 	conns    []*pconn
 	dial     *dialState // dial in flight (singleflight), else nil
+	failedAt time.Time  // last dial failure
 	everUp   bool
 	lost     bool // "lost" sent, "reconnected" not yet
 	ensuring bool
@@ -73,7 +83,7 @@ func newUpstream(host string, port int, ip string, sndbuf int, ev *events) *upst
 	tr.MaxReadFrameSize = 1 << 20
 	// A proxy request carries only what the edge needs: no accept-encoding.
 	tr.DisableCompression = true
-	u := &upstream{ip: ip, host: host, port: port, ev: ev, tr: tr}
+	u := &upstream{ip: ip, host: host, port: port, ev: ev, tr: tr, want: 1}
 	u.dialFn = func(ctx context.Context) (net.Conn, string, error) {
 		return dialTLS(ctx, ip, host, port, sndbuf)
 	}
@@ -94,11 +104,10 @@ func (u *upstream) get(ctx context.Context) (*pconn, error) {
 			u.mu.Unlock()
 			return nil, fmt.Errorf("engine closed")
 		}
-		for _, c := range u.conns {
-			if c.cc.ReserveNewRequest() {
-				u.mu.Unlock()
-				return c, nil
-			}
+		if c := u.reserveLocked(); c != nil {
+			u.topUpLocked()
+			u.mu.Unlock()
+			return c, nil
 		}
 		d := u.startDialLocked()
 		u.mu.Unlock()
@@ -111,6 +120,57 @@ func (u *upstream) get(ctx context.Context) (*pconn, error) {
 			return nil, ctx.Err()
 		}
 	}
+}
+
+// reserveLocked reserves a stream on the open connection with the fewest
+// streams, or returns nil if none can take one.
+func (u *upstream) reserveLocked() *pconn {
+	tried := make([]bool, len(u.conns))
+	for range u.conns {
+		best, load := -1, 0
+		for i, c := range u.conns {
+			if tried[i] {
+				continue
+			}
+			st := c.cc.State()
+			if st.Closed || st.Closing {
+				tried[i] = true
+				continue
+			}
+			if l := st.StreamsActive + st.StreamsReserved + st.StreamsPending; best < 0 || l < load {
+				best, load = i, l
+			}
+		}
+		if best < 0 {
+			break
+		}
+		tried[best] = true
+		if u.conns[best].cc.ReserveNewRequest() {
+			return u.conns[best]
+		}
+	}
+	return nil
+}
+
+// openLocked counts connections that can still take new streams.
+func (u *upstream) openLocked() int {
+	n := 0
+	for _, c := range u.conns {
+		if st := c.cc.State(); !st.Closed && !st.Closing {
+			n++
+		}
+	}
+	return n
+}
+
+// topUpLocked dials one more connection in the background when the pool is
+// short, unless a dial is running or one failed within extraRetry. Never
+// blocks a flow.
+func (u *upstream) topUpLocked() {
+	if u.closed || u.dial != nil || u.openLocked() >= u.want || time.Since(u.failedAt) < extraRetry {
+		return
+	}
+	u.startDialLocked()
 }
 
 func (u *upstream) startDialLocked() *dialState {
@@ -156,6 +216,9 @@ func (u *upstream) runDial(d *dialState) {
 	}
 	u.dial = nil
 	d.err = err
+	if err != nil {
+		u.failedAt = time.Now()
+	}
 	u.mu.Unlock()
 	close(d.done)
 
@@ -170,6 +233,11 @@ func (u *upstream) runDial(d *dialState) {
 		u.ev.logf("new upstream connection (" + info + ")")
 	}
 	go u.monitor(pc)
+
+	// Fill the pool one connection at a time.
+	u.mu.Lock()
+	u.topUpLocked()
+	u.mu.Unlock()
 }
 
 // ensure makes sure a usable connection exists, redialing with backoff
@@ -242,6 +310,9 @@ loop:
 				}
 				u.ev.logf("upstream connection draining: " + text)
 				u.ensure()
+				u.mu.Lock()
+				u.topUpLocked()
+				u.mu.Unlock()
 			}
 			if st.Closing && st.StreamsActive == 0 && st.StreamsReserved == 0 {
 				u.mu.Lock()
@@ -277,6 +348,9 @@ loop:
 		u.ev.logf("upstream connection ended: " + pc.w.why())
 	}
 	u.ensure()
+	u.mu.Lock()
+	u.topUpLocked()
+	u.mu.Unlock()
 }
 
 func (u *upstream) close() {

@@ -13,6 +13,7 @@ import (
 type events struct {
 	mu       sync.Mutex
 	lastAuth time.Time
+	authPend bool // a suppressed auth_failed is queued
 	w        *bufio.Writer
 	log      struct {
 		window time.Time
@@ -69,11 +70,17 @@ func (e *events) stats(up, down int64) {
 }
 
 // authFailed tells the app the edge rejected our token (it renews the pass
-// and sends a new token line). At most one per 5 s.
+// and sends a new token line). Never more than one per 5 s; one that falls
+// inside the window is queued and emitted when the window ends (at most one
+// pending).
 func (e *events) authFailed() {
 	e.mu.Lock()
 	now := time.Now()
 	if !e.lastAuth.IsZero() && now.Sub(e.lastAuth) < authFailedEvery {
+		if !e.authPend {
+			e.authPend = true
+			time.AfterFunc(authFailedEvery-now.Sub(e.lastAuth), e.authTrailing)
+		}
 		e.mu.Unlock()
 		return
 	}
@@ -82,4 +89,12 @@ func (e *events) authFailed() {
 	e.emit(map[string]any{"type": "auth_failed"})
 }
 
-const authFailedEvery = 5 * time.Second
+func (e *events) authTrailing() {
+	e.mu.Lock()
+	e.authPend = false
+	e.lastAuth = time.Now()
+	e.mu.Unlock()
+	e.emit(map[string]any{"type": "auth_failed"})
+}
+
+var authFailedEvery = 5 * time.Second

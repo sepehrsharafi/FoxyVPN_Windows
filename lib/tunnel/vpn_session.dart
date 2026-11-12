@@ -69,6 +69,7 @@ class VpnSession {
   Timer? _renewTimer;
   Future<void>? _renewing;
   String _token = '';
+  DateTime? _tokenExpiresAt;
   int? _quotaAtFetch;
   int? _quotaMax;
   DateTime? _quotaResetsAt;
@@ -107,6 +108,11 @@ class VpnSession {
   int get socksPort => _engineSocksPort ?? _socks.port;
 
   InternetAddress get upstreamAddress => _pinned;
+
+  /// The current proxy pass token and when it ends (null: unknown). Lets the
+  /// location probe reuse it instead of fetching another pass.
+  String get token => _token;
+  DateTime? get tokenExpiresAt => _tokenExpiresAt;
 
   /// Emits the current phase first, then every change; closes after [VpnPhase.stopped].
   Stream<VpnPhase> get phases => Stream.multi((out) {
@@ -238,6 +244,7 @@ class VpnSession {
   void _applyPass(ProxyPass pass) {
     if (_stopped) return;
     _token = pass.token;
+    _tokenExpiresAt = pass.expiresAt;
     _quotaAtFetch = pass.quotaRemaining;
     _quotaUnlimited = pass.quotaUnlimited;
     // An unlimited pass carries no numbers; an old cap must not linger.

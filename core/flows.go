@@ -122,12 +122,53 @@ func copyCount(dst io.Writer, src io.Reader, buf []byte, ctr *atomic.Int64) erro
 	}
 }
 
+// halfCloseIdle: once the client has half-closed, a stream that receives no
+// download bytes for this long is cancelled (safety net against an edge that
+// never ends the stream). Any downstream byte resets the timer.
+var halfCloseIdle = 5 * time.Minute
+
+// idleBody stamps the time of the last downstream read that returned data.
+type idleBody struct {
+	io.Reader
+	last *atomic.Int64 // unix nanos
+}
+
+func (b idleBody) Read(p []byte) (int, error) {
+	n, err := b.Reader.Read(p)
+	if n > 0 {
+		b.last.Store(time.Now().UnixNano())
+	}
+	return n, err
+}
+
 // bridge copies both ways. Client EOF ends the request body (END_STREAM)
 // while the response keeps flowing; response EOF becomes a half-close of the
 // client socket. A failure on either side cancels the stream, which makes
 // x/net send RST_STREAM (in the right order, after HEADERS). up and down
 // (may be nil) count the payload bytes moved.
 func bridge(c net.Conn, in io.Reader, body io.Reader, pw *io.PipeWriter, cancel context.CancelFunc, up, down *atomic.Int64) {
+	var lastDown atomic.Int64
+	var halfClosed atomic.Bool
+	lastDown.Store(time.Now().UnixNano())
+	body = idleBody{body, &lastDown}
+	done := make(chan struct{})
+	defer close(done)
+	idle := halfCloseIdle
+	go func() {
+		tk := time.NewTicker(max(idle/4, time.Millisecond))
+		defer tk.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-tk.C:
+				if halfClosed.Load() && time.Since(time.Unix(0, lastDown.Load())) > idle {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -137,6 +178,7 @@ func bridge(c net.Conn, in io.Reader, body io.Reader, pw *io.PipeWriter, cancel 
 		upBufs.Put(bp)
 		if err == nil {
 			pw.Close() // client EOF: our half-close
+			halfClosed.Store(true)
 			return
 		}
 		pw.CloseWithError(err)

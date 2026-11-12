@@ -16,7 +16,8 @@ import '../widgets/pressable.dart';
 import '../widgets/signal_bars.dart';
 import '../widgets/tabular_text.dart';
 
-/// Pick a location: search, Recommended first, then by ping.
+/// Pick a location: search, Recommended first, then by real delay (the time of
+/// one request through that location's exit).
 class LocationsScreen extends StatefulWidget {
   const LocationsScreen({super.key, required this.controller});
 
@@ -31,6 +32,16 @@ class LocationsScreen extends StatefulWidget {
 
 class _LocationsScreenState extends State<LocationsScreen> {
   final _search = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    // Opening the page measures the delays again if they are older than the
+    // cache allows (the controller decides; a no-op when they are fresh).
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) unawaited(_c.refreshDelaysIfStale().catchError((Object _) {}));
+    });
+  }
 
   @override
   void dispose() {
@@ -192,6 +203,16 @@ class _LocationsScreenState extends State<LocationsScreen> {
           SliverPadding(
             padding: const EdgeInsets.symmetric(horizontal: FoxySpace.screen),
             sliver: SliverToBoxAdapter(child: card(recommendedCard, wide: true)),
+          ),
+        if (_c.delaysAreEstimates)
+          SliverPadding(
+            padding: const EdgeInsets.fromLTRB(FoxySpace.screen + 2, 12, FoxySpace.screen, 0),
+            sliver: SliverToBoxAdapter(
+              child: Text(
+                'Connection time only. The real delay can\'t be measured right now.',
+                style: FoxyText.caption.copyWith(color: FoxyColors.textFaint),
+              ),
+            ),
           ),
         SliverToBoxAdapter(
           child: showHeading
@@ -369,7 +390,7 @@ class _PingLine extends StatelessWidget {
         ),
       );
     } else {
-      figure = Text('No reply', maxLines: 1, style: style.copyWith(color: FoxyColors.textFaint));
+      figure = Text('Unavailable', maxLines: 1, style: style.copyWith(color: FoxyColors.textFaint));
     }
     final rest = detail;
     // A short crossfade when the spinner turns into the ping (keyed by kind, so a

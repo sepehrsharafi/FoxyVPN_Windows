@@ -1,6 +1,6 @@
 ; FoxyVPN installer (Inno Setup 6.3 or newer). Build it from the repository root:
 ;
-;   ISCC.exe /DAppVersion=0.1.0 installer\foxyvpn.iss
+;   ISCC.exe /DAppVersion=1.0.9 installer\foxyvpn.iss
 ;
 ; AppVersion is the pubspec version without the "+build" part (CI passes it).
 ; The Release folder (flutter build windows --release, plus tun2socks.exe,

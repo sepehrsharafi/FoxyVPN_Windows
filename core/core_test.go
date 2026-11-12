@@ -383,3 +383,58 @@ func TestUsageError(t *testing.T) {
 		t.Fatal("expected exit status 2")
 	}
 }
+
+// With want=3 the pool fills to three connections, spreads flows over them,
+// and losing one is not "lost": the others carry on and it is replaced.
+func TestPoolSpreadsAndSurvivesOneLoss(t *testing.T) {
+	edge := newTestEdge(t)
+	g := startEngine(t, edge)
+	g.up.mu.Lock()
+	g.up.want = 3
+	g.up.mu.Unlock()
+	g.ev.wait(t, "connected", 0)
+
+	waitFor := func(what string, ok func() bool) {
+		t.Helper()
+		for deadline := time.Now().Add(5 * time.Second); !ok(); time.Sleep(20 * time.Millisecond) {
+			if time.Now().After(deadline) {
+				t.Fatalf("timed out waiting for %s", what)
+			}
+		}
+	}
+	open := func() int {
+		g.up.mu.Lock()
+		defer g.up.mu.Unlock()
+		return g.up.openLocked()
+	}
+	// The first flow tops the pool up; it fills one dial at a time.
+	if _, _, reply := g.flow("TCP", "echo.test", "443"); reply != "OK" {
+		t.Fatal(reply)
+	}
+	waitFor("3 connections", func() bool { return open() == 3 })
+
+	for k := 0; k < 5; k++ {
+		if _, _, reply := g.flow("TCP", "echo.test", "443"); reply != "OK" {
+			t.Fatal(reply)
+		}
+	}
+	waitFor("2 streams on each connection", func() bool {
+		g.up.mu.Lock()
+		defer g.up.mu.Unlock()
+		for _, c := range g.up.conns {
+			if c.cc.State().StreamsActive != 2 {
+				return false
+			}
+		}
+		return len(g.up.conns) == 3
+	})
+
+	edge.killOne()
+	waitFor("replacement connection", func() bool { return edge.connCount() == 4 && open() == 3 })
+	if _, _, reply := g.flow("TCP", "echo.test", "443"); reply != "OK" {
+		t.Fatalf("flow after losing one connection: %q", reply)
+	}
+	if strings.Contains(g.ev.all(), `"lost"`) {
+		t.Fatalf("one dropped connection out of three reported as lost:\n%s", g.ev.all())
+	}
+}

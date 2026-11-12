@@ -44,6 +44,12 @@ class _Session implements VpnSession {
   InternetAddress get upstreamAddress => InternetAddress('203.0.113.9');
 
   @override
+  String get token => 'tok';
+
+  @override
+  DateTime? get tokenExpiresAt => null;
+
+  @override
   Stream<VpnPhase> get phases => Stream.multi((c) {
     c.add(VpnPhase.connected);
     final sub = changes.stream.listen(c.add);
@@ -262,13 +268,13 @@ void main() {
       expect(connects, ['ber']);
     });
 
-    test('pings older than two minutes are measured again, and the new numbers count', () async {
+    test('pings older than five minutes are measured again, and the new numbers count', () async {
       final c = make();
       await c.init();
       await pumpEventQueue();
       expect(c.pingOf(c.locations.firstWhere((l) => l.cityCode == 'ber')), 25);
 
-      now = now.add(const Duration(minutes: 3));
+      now = now.add(const Duration(minutes: 6));
       pings = {'rec': 5, 'vie': 10, 'ber': 25, 'par': 60};
       await c.quickConnectFastest();
       expect(loads, 2);

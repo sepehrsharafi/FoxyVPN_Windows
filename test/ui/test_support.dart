@@ -246,6 +246,24 @@ class FakeVpnController extends ChangeNotifier implements VpnController {
   }
 
   @override
+  Future<void> refreshDelays() async {
+    calls.add('refreshDelays');
+  }
+
+  @override
+  Future<void> refreshDelaysIfStale() async {
+    pageOpenChecks++; // not in [calls]: every Locations page open does it
+  }
+
+  int pageOpenChecks = 0;
+
+  /// Tests: the last round measured only TCP connect times.
+  bool estimates = false;
+
+  @override
+  bool get delaysAreEstimates => estimates;
+
+  @override
   Location? get selected => _selected;
 
   @override

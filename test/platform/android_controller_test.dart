@@ -52,6 +52,12 @@ class _Session implements VpnSession {
   InternetAddress get upstreamAddress => InternetAddress('203.0.113.9');
 
   @override
+  String get token => 'tok';
+
+  @override
+  DateTime? get tokenExpiresAt => null;
+
+  @override
   Stream<VpnPhase> get phases => Stream.multi((c) {
     c.add(phase);
     final sub = changes.stream.listen(c.add);

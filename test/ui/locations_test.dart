@@ -31,12 +31,12 @@ void main() {
     c.setPing(l[3], 30); // Vienna
     c.setPing(l[4], 240);
     c.setPing(l[5], 330);
-    c.setPing(l[6], null); // no reply
+    c.setPing(l[6], null); // unavailable
     c.setPing(l[7], 95);
     return c;
   }
 
-  testWidgets('Recommended first, then by ping, no reply last; no tick on the selected row', (tester) async {
+  testWidgets('Recommended first, then by ping, unavailable last; no tick on the selected row', (tester) async {
     final c = await open(tester, controller: withPings());
 
     final names = [
@@ -51,7 +51,7 @@ void main() {
     final germany = names.indexOf('Germany');
     expect(austria, lessThan(germany));
     expect(germany, lessThan(bosnia));
-    expect(names.indexOf('Japan'), greaterThan(names.indexOf('United States')), reason: 'no reply sorts last');
+    expect(names.indexOf('Japan'), greaterThan(names.indexOf('United States')), reason: 'unavailable sorts last');
     // City is shown only for countries with several cities (after the ping: "60 ms · Frankfurt").
     expect(find.descendant(of: find.byType(CustomScrollView), matching: find.textContaining('Frankfurt')), findsOneWidget);
     expect(find.descendant(of: find.byType(CustomScrollView), matching: find.textContaining('Vienna')), findsNothing);
@@ -66,6 +66,26 @@ void main() {
     );
     expect(tester.takeException(), isNull);
     expect(c.calls, isEmpty);
+  });
+
+  group('real delay', () {
+    testWidgets('opening the page asks the controller to measure if its cache is stale', (tester) async {
+      final c = await open(tester, controller: withPings());
+      expect(c.pageOpenChecks, 1);
+    });
+
+    testWidgets('the note about connection time shows only when the delays are TCP estimates', (tester) async {
+      final c = FakeVpnController();
+      c.estimates = true;
+      await open(tester, controller: c);
+      expect(find.textContaining('Connection time only'), findsOneWidget);
+
+    });
+
+    testWidgets('no note when the delays are real', (tester) async {
+      await open(tester);
+      expect(find.textContaining('Connection time only'), findsNothing);
+    });
   });
 
   group('ping on every card', () {
@@ -85,7 +105,7 @@ void main() {
       }
       // No signal bars any more; the two locations without a reply say so.
       expect(inGrid(find.byType(PingReadout)), findsNothing);
-      expect(inGrid(find.text('No reply')), findsNWidgets(2));
+      expect(inGrid(find.text('Unavailable')), findsNWidgets(2));
 
       // The ping sits on the second line, under the name and to the right of the flag.
       final austria = tester.getRect(inGrid(find.text('Austria')));
@@ -132,7 +152,7 @@ void main() {
       expect(inGrid(find.textContaining('Mozilla\'s pick')), findsOneWidget);
     });
 
-    testWidgets('no reply is "No reply", measuring is a spinner, and the ping style is 13 / 600 textDim', (
+    testWidgets('unavailable is "Unavailable", measuring is a spinner, and the ping style is 13 / 600 textDim', (
       tester,
     ) async {
       final c = withPings();
@@ -141,8 +161,8 @@ void main() {
       c.setPinging(l[8], true); // Singapore, still pinging
       await open(tester, controller: c);
 
-      // Tokyo (index 6) has no reply.
-      expect(inGrid(find.text('No reply')), findsOneWidget);
+      // Tokyo (index 6) has unavailable.
+      expect(inGrid(find.text('Unavailable')), findsOneWidget);
       expect(inGrid(find.text('—')), findsNothing);
       expect(inGrid(find.byType(CircularProgressIndicator)), findsOneWidget);
       final style = tester.widget<TabularText>(inGrid(find.tabular('30 ms'))).style;
