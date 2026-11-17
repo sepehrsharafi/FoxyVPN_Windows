@@ -87,7 +87,7 @@ jobs:
         run: |
           go vet -tags http2legacy ./...
           go test -tags http2legacy ./...
-          go build -tags http2legacy -trimpath -ldflags "-s -w -H windowsgui" -o ../build/windows/x64/runner/Release/foxy-core.exe .
+          go build -tags http2legacy -trimpath -ldflags "-s -w" -o ../build/windows/x64/runner/Release/foxy-core.exe .
 
       - name: Add tun2socks and Wintun next to foxyvpn.exe
         shell: pwsh

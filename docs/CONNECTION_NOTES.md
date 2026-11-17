@@ -252,7 +252,11 @@ through each location's exit, like v2rayN.
     `engine.open('dl-cdn.alpinelinux.org', 80)` directly with an HTTP GET.
 - `speed.cloudflare.com` returns 403 to Dart's TLS client, so use the alpine ISO over plain HTTP.
 - Build the exe first: `cd core && CGO_ENABLED=0 go build -tags http2legacy -trimpath
-  -ldflags "-s -w -H windowsgui" -o ../build/foxy-core.exe .`.
+  -ldflags "-s -w" -o ../build/foxy-core.exe .`.
+- **Never `-H windowsgui`:** a GUI-subsystem exe that never pumps messages keeps Windows' busy
+  ("app starting") cursor on for its whole life when the app launches it (seen 2026-11-17: the
+  spinner stayed for the whole VPN session). As a console exe, like tun2socks, Dart's
+  `Process.start` runs it with no window and no busy cursor.
 - Use an edge IP from the current log (`Connected via ...`). While the VPN is on, only the
   pinned IP has a bypass route.
 
