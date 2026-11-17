@@ -32,10 +32,13 @@ class LocationsScreen extends StatefulWidget {
 
 class _LocationsScreenState extends State<LocationsScreen> {
   final _search = TextEditingController();
+  late ConnState _lastState;
 
   @override
   void initState() {
     super.initState();
+    _lastState = _c.state;
+    _c.addListener(_onController);
     // Opening the page measures the delays again if they are older than the
     // cache allows (the controller decides; a no-op when they are fresh).
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -43,8 +46,22 @@ class _LocationsScreenState extends State<LocationsScreen> {
     });
   }
 
+  /// After a disconnect (or a failed connect) the delays are old: measure again
+  /// while the page is open (the controller marks them stale and decides).
+  void _onController() {
+    final state = _c.state;
+    final was = _lastState;
+    _lastState = state;
+    if (state == ConnState.idle && was != ConnState.idle && was != ConnState.preparing) {
+      scheduleMicrotask(() {
+        if (mounted) unawaited(_c.refreshDelaysIfStale().catchError((Object _) {}));
+      });
+    }
+  }
+
   @override
   void dispose() {
+    _c.removeListener(_onController);
     _search.dispose();
     super.dispose();
   }

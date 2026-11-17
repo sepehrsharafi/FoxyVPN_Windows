@@ -1137,13 +1137,13 @@ void main() {
       expect(c.delaysAreEstimates, isTrue);
     });
 
-    test('no pass at hand (the account check failed): the old TCP ping, and no pass fetch for the probe', () async {
+    test('no pass at hand (the account check failed): one more pass fetch for the probe, then the old TCP ping', () async {
       account.passError = StateError('offline');
       final c = build();
       await c.init();
       await pumpEventQueue();
       expect(probe.runs, 0);
-      expect(account.passRequests, 1);
+      expect(account.passRequests, 2, reason: 'the account check plus one fetch for the probe');
       expect(c.pingOf(paris), 30);
       expect(c.delaysAreEstimates, isTrue);
     });
@@ -1167,10 +1167,12 @@ void main() {
       expect(probe.runs, 1);
       expect(c.pingOf(paris), 30);
       expect(c.delaysAreEstimates, isTrue);
-      // The rejected pass is not tried again.
+      // The rejected pass is dropped: the next round fetches a new one.
+      final passes = account.passRequests;
       probe.answers.updateAll((_, _) => const ProbeResult.ok(1));
       await c.refreshDelays();
-      expect(probe.runs, 1);
+      expect(account.passRequests, passes + 1);
+      expect(probe.runs, 2);
     });
 
     test('opening the Locations page measures again only when the cache is older than five minutes', () async {
@@ -1266,6 +1268,112 @@ void main() {
       expect(probe.ips.last, InternetAddress('203.0.113.9'));
       expect(c.pingOf(berlin), 15);
       await c.shutdown();
+    });
+
+    test('a refresh round clears the old values at its start and keeps the card order still', () async {
+      final c = build();
+      await c.init();
+      await pumpEventQueue();
+      expect(c.pingOf(paris), 60);
+      expect(c.locations.map((l) => l.countryCode), ['REC', 'FR', 'DE', 'JP']);
+      // The next round: only Berlin answers (and is now the fastest), then it waits.
+      probe.answers['ber.example.com:443'] = const ProbeResult.ok(20);
+      probe.hangAfter = 1;
+      probe.order = ['ber.example.com:443'];
+      probe.gate = Completer<void>();
+      final round = c.refreshDelays();
+      await pumpEventQueue();
+      expect(c.pingingLocations, isTrue);
+      expect(c.pingOf(paris), isNull, reason: 'the old value is gone, not shown next to the spinner');
+      expect(c.pingOf(tokyo), isNull);
+      expect(c.pingOf(berlin), 20);
+      expect(c.locations.map((l) => l.countryCode), ['REC', 'FR', 'DE', 'JP'], reason: 'the order holds during the round');
+      probe.gate!.complete();
+      await round;
+      expect(c.pingingLocations, isFalse);
+    });
+
+    test('results of a superseded round are ignored', () async {
+      final c = build();
+      await c.init();
+      await pumpEventQueue();
+      await c.select(berlin);
+      probe.answers['ber.example.com:443'] = const ProbeResult.ok(5);
+      probe.gate = Completer<void>();
+      final round = c.refreshDelays();
+      await pumpEventQueue();
+      expect(c.pingingLocations, isTrue);
+      await c.connect(); // starts: the running round is dropped
+      expect(c.pingingLocations, isFalse);
+      probe.gate!.complete();
+      await round;
+      await pumpEventQueue();
+      expect(c.pingOf(berlin), isNull, reason: 'the old round must not write into the state');
+      expect(c.pingingLocations, isFalse);
+      await c.shutdown();
+    });
+
+    test('after a disconnect TCP-only delays are measured again on the next look', () async {
+      probe.available = false;
+      final c = build();
+      await c.init();
+      await pumpEventQueue();
+      await c.connect();
+      await c.disconnect();
+      expect(c.state, ConnState.idle);
+      final before = tcpPings;
+      await c.refreshDelaysIfStale();
+      expect(tcpPings, greaterThan(before));
+    });
+
+    test('after a disconnect real delays younger than five minutes are kept', () async {
+      final c = build();
+      await c.init();
+      await pumpEventQueue();
+      await c.connect();
+      await c.disconnect();
+      expect(c.state, ConnState.idle);
+      final runs = probe.runs;
+      await c.refreshDelaysIfStale();
+      expect(probe.runs, runs);
+      now = now.add(const Duration(minutes: 6));
+      await c.refreshDelaysIfStale();
+      expect(probe.runs, runs + 1);
+    });
+
+    test('disconnected with an expired remembered pass: one pass is fetched and the probe runs', () async {
+      final c = build();
+      await c.init();
+      await pumpEventQueue();
+      expect(account.passRequests, 1);
+      now = now.add(const Duration(minutes: 20)); // the remembered pass has expired
+      await c.refreshDelaysIfStale();
+      expect(account.passRequests, 2, reason: 'a pass is fetched for the probe');
+      expect(probe.runs, 2);
+      expect(tcpPings, 0);
+      expect(c.delaysAreEstimates, isFalse);
+      expect(c.pingOf(berlin), 120);
+      // The fetched pass is remembered: a refresh soon after does not fetch again.
+      await c.refreshDelays();
+      expect(account.passRequests, 2);
+      expect(probe.runs, 3);
+      await c.shutdown();
+    });
+
+    test('the pass fetch for the probe failing falls back to the TCP ping and logs why', () async {
+      final c = build();
+      await c.init();
+      await pumpEventQueue();
+      now = now.add(const Duration(minutes: 20));
+      account.passError = const SocketException('no route');
+      await c.refreshDelaysIfStale();
+      expect(account.passRequests, 2);
+      expect(probe.runs, 1);
+      expect(tcpPings, greaterThan(0));
+      expect(c.delaysAreEstimates, isTrue);
+      final log = File('${dir.path}\\log.txt').readAsStringSync();
+      expect(log, contains('TCP ping instead of the real delay (pass fetch failed'));
+      expect(log, isNot(contains('tok')));
     });
 
     test('connected with TCP-only delays: nothing is measured (a TCP ping through the tunnel means nothing)', () async {

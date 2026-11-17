@@ -75,6 +75,20 @@ Object? parseProbeLine(String line) {
 /// Starts the engine process; replaced in tests.
 typedef ProbeStarter = Future<Process> Function(String executable, List<String> arguments);
 
+/// One run of the probe: lets a newer run cancel it.
+class _ProbeRun {
+  bool cancelled = false;
+  Process? process;
+  final done = Completer<void>();
+  Future<void> finished = Future.value();
+
+  void cancel() {
+    cancelled = true;
+    process?.kill();
+    if (!done.isCompleted) done.complete();
+  }
+}
+
 class LocationProbe {
   LocationProbe({
     Future<String?> Function()? findExecutable,
@@ -95,7 +109,7 @@ class LocationProbe {
   final Duration overallTimeout;
 
   Future<String?>? _executable;
-  Future<void>? _running;
+  _ProbeRun? _current;
 
   /// Whether there is an engine to run the probe with on this platform.
   Future<bool> isAvailable() async => await (_executable ??= _find().catchError((Object _) => null)) != null;
@@ -104,25 +118,45 @@ class LocationProbe {
   /// arrives. [ip] is the pinned edge IPv4; null resolves the first server's
   /// host (only valid while the VPN is not up). Servers that never answered
   /// get a `failed` result at the end. Throws when the probe could not run at
-  /// all (no engine, no output): then nothing was measured. One run at a time:
-  /// a second call joins the one in flight (and gets no callbacks).
+  /// all (no engine, no output): then nothing was measured. One process at a time:
+  /// a second call cancels the run in flight (its process is killed, it returns
+  /// without further callbacks) and starts afresh, so the newest caller always
+  /// gets the callbacks.
   Future<void> run({
     required List<String> servers,
     required String token,
     InternetAddress? ip,
     required void Function(String server, ProbeResult result) onResult,
-  }) => _running ??= _run(servers, token, ip, onResult).whenComplete(() => _running = null);
+  }) {
+    final previous = _current;
+    previous?.cancel();
+    final run = _ProbeRun();
+    _current = run;
+    final future = _run(run, previous?.finished, servers, token, ip, onResult);
+    run.finished = future.then((_) {}, onError: (Object _) {});
+    return future.whenComplete(() {
+      if (identical(_current, run)) _current = null;
+    });
+  }
+
+  /// Stops the run in flight, if any (its caller gets no more callbacks).
+  void cancel() => _current?.cancel();
 
   Future<void> _run(
+    _ProbeRun run,
+    Future<void>? previous,
     List<String> servers,
     String token,
     InternetAddress? ip,
     void Function(String, ProbeResult) onResult,
   ) async {
-    if (servers.isEmpty) return;
+    if (previous != null) await previous; // its process is gone before this one starts
+    if (servers.isEmpty || run.cancelled) return;
     final exe = await (_executable ??= _find().catchError((Object _) => null));
     if (exe == null) throw const SocketException('foxy-core is not available');
+    if (run.cancelled) return;
     final address = ip ?? await _resolve(servers.first.split(':').first);
+    if (run.cancelled) return;
     final process = await _starter(exe, [
       '--probe',
       '--ip',
@@ -132,10 +166,16 @@ class LocationProbe {
       '--timeout',
       '${perServerTimeout.inSeconds}s',
     ]);
+    run.process = process;
+    if (run.cancelled) {
+      process.kill();
+      return;
+    }
     final pending = {...servers};
     var heard = 0;
-    final done = Completer<void>();
+    final done = run.done;
     final sub = process.stdout.transform(utf8.decoder).transform(const LineSplitter()).listen((line) {
+      if (run.cancelled) return;
       final parsed = parseProbeLine(line);
       if (parsed is ProbeEntry) {
         heard++;
@@ -164,7 +204,7 @@ class LocationProbe {
     try {
       await done.future.timeout(overallTimeout);
     } on TimeoutException {
-      AppLog.write('Location probe: gave up after ${overallTimeout.inSeconds} s');
+      if (!run.cancelled) AppLog.write('Location probe: gave up after ${overallTimeout.inSeconds} s');
     } finally {
       process.kill();
       unawaited(sub.cancel());
@@ -173,6 +213,7 @@ class LocationProbe {
         await process.stdin.close();
       } catch (_) {}
     }
+    if (run.cancelled) return;
     if (heard == 0) throw const SocketException('the location probe gave no answer');
     for (final server in pending) {
       onResult(server, const ProbeResult.failed('no answer'));

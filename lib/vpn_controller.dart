@@ -192,12 +192,18 @@ class VpnController extends ChangeNotifier {
   Future<void>? _pingFuture; // the measuring round of the current list
   final Map<Location, int?> _roundPings = {}; // answers of the current / last round only
   bool _delaysMeasured = false; // a round of the current list has finished
+  // TCP-only delays that were complete at a disconnect: the Locations page measures
+  // them again, but a quick Recommended reconnect may still use them (while fresh).
+  bool _tcpHeldAfterDisconnect = false;
   bool _probedDelays = false; // ... and it measured real delays (not TCP connect times)
   Future<void>? _accountCheck; // the pass fetch that gives the probe its token
   String? _probeToken; // a pass the app already has; the probe never fetches one
   DateTime? _probeTokenUntil;
   DateTime? _locationsAt; // when the current list was loaded (and pinged)
   int _generation = 0; // invalidates pings of an older list
+  int _round = 0; // id of the newest measuring round; older rounds' results are dropped
+  bool _orderHeld = false; // a round was abandoned: _orderPings already has the order to keep
+  Future<void>? _probePassFetch; // the one pass fetch for the probe in flight
   String? _selectedKey;
   Location? _selected;
 
@@ -682,11 +688,13 @@ class VpnController extends ChangeNotifier {
       final locations = await _loadLocations();
       _generation++;
       _locations = locations;
-      _orderPings = {for (final e in _pings.entries) locationKey(e.key): e.value};
+      if (!_orderHeld) _orderPings = {for (final e in _pings.entries) locationKey(e.key): e.value};
+      _orderHeld = false;
       _pings.clear();
       _pinging.clear();
       _sortedCache = null;
       _delaysMeasured = false;
+      _tcpHeldAfterDisconnect = false;
       _loadingLocations = false;
       _locationsAt = _clock();
       _resolveSelected();
@@ -707,20 +715,29 @@ class VpnController extends ChangeNotifier {
   /// show as they come; the order moves once, when the round is done.
   Future<void> _pingAll() async {
     final generation = _generation;
+    final round = ++_round;
+    _tcpHeldAfterDisconnect = false;
+    bool stale() => _roundIsStale(generation, round);
     final batch = [..._locations];
+    // The previous values go at the start: a spinner next to an old number that is
+    // later overwritten looks like a result. The order holds on [_orderPings].
+    for (final l in batch) {
+      _pings.remove(l);
+    }
     _roundPings.clear();
     _pinging.addAll(batch);
     _sortedCache = null; // the order now holds still until the round is done
     _notify();
     var probed = false;
     try {
-      probed = await _probeRound(batch, generation);
+      probed = await _probeRound(batch, generation, round);
     } catch (e) {
       AppLog.write('Location probe failed: $e');
+      _logFallback('probe failed: $e');
     }
-    if (_disposed || generation != _generation) return;
-    if (!probed) await _tcpRound(batch, generation);
-    if (_disposed || generation != _generation) return;
+    if (stale()) return;
+    if (!probed) await _tcpRound(batch, generation, round);
+    if (stale()) return;
     _probedDelays = probed;
     _delaysMeasured = true;
     _locationsAt = _clock(); // the cache is fresh from here
@@ -729,15 +746,40 @@ class VpnController extends ChangeNotifier {
     _notify();
   }
 
-  void _setDelay(Location l, int? ms) {
+  /// Drops whatever round is running: its results are ignored from now on and its
+  /// probe process is killed. What it measured so far stays; the order holds.
+  /// [stale] also marks the delays as old when no round was running.
+  void _invalidateRound({bool stale = false}) {
+    final running = _pinging.isNotEmpty;
+    _round++;
+    _probe.cancel();
+    if (running) {
+      _orderPings = {
+        for (final l in _locations) locationKey(l): _pings.containsKey(l) ? _pings[l] : _orderPings[locationKey(l)],
+      };
+      _orderHeld = true;
+      _pinging.clear();
+      _pingFuture = null;
+      _sortedCache = null;
+    }
+    if (running || stale) _delaysMeasured = false;
+  }
+
+  /// One line whenever a round could not use the probe.
+  void _logFallback(String reason) => AppLog.write('Location delays: TCP ping instead of the real delay ($reason)');
+
+  bool _roundIsStale(int generation, int round) => _disposed || generation != _generation || round != _round;
+
+  void _setDelay(Location l, int? ms, int round) {
+    if (round != _round) return;
     _pings[l] = ms;
     _roundPings[l] = ms;
     _pinging.remove(l);
   }
 
-  /// A pass the app already has: it is never fetched for the probe (that would add
-  /// control-plane traffic). The pass of the account check at startup / sign-in
-  /// and the last one of a session are remembered.
+  /// A pass the app already has: the pass of the account check at startup / sign-in
+  /// and the last one of a session are remembered. When none is usable and the app
+  /// is idle, [_fetchProbePass] gets one.
   void _rememberToken(String token, DateTime? expiresAt) {
     if (token.isEmpty) return;
     _probeToken = token;
@@ -763,14 +805,26 @@ class VpnController extends ChangeNotifier {
   /// The real-delay round. False means it did not run (no engine, no usable pass,
   /// every answer was an auth failure, or it died at once) and the caller falls
   /// back to the TCP ping. True also when the round was abandoned.
-  Future<bool> _probeRound(List<Location> batch, int generation) async {
-    if (!await _probe.isAvailable()) return false;
+  Future<bool> _probeRound(List<Location> batch, int generation, int round) async {
+    if (!await _probe.isAvailable()) {
+      _logFallback('no engine');
+      return false;
+    }
     // The startup account check gives the pass; it never throws.
     final pending = _accountCheck;
     if (pending != null && _session == null) await pending.timeout(const Duration(seconds: 10), onTimeout: () {});
-    if (_disposed || generation != _generation) return true;
-    final credentials = _probeCredentials();
-    if (credentials == null) return false;
+    if (_roundIsStale(generation, round)) return true;
+    var credentials = _probeCredentials();
+    String? fetchError;
+    if (credentials == null && _canFetchProbePass) {
+      fetchError = await _fetchProbePass();
+      if (_roundIsStale(generation, round)) return true;
+      credentials = _probeCredentials();
+    }
+    if (credentials == null) {
+      _logFallback(fetchError != null ? 'pass fetch failed: $fetchError' : 'no pass');
+      return false;
+    }
     final byServer = <String, List<Location>>{};
     for (final l in batch) {
       final s = l.servers.first;
@@ -786,19 +840,24 @@ class VpnController extends ChangeNotifier {
         onResult: (server, result) {
           answered++;
           if (result.authFailed) authFailures++;
-          if (_disposed || generation != _generation) return;
+          if (_roundIsStale(generation, round)) return;
           for (final l in byServer[server] ?? const <Location>[]) {
-            _setDelay(l, result.ms);
+            _setDelay(l, result.ms, round);
           }
           _notifySoon();
         },
       );
     } catch (e) {
       AppLog.write('Location probe: $e');
-      if (answered == 0) return false;
+      if (_roundIsStale(generation, round)) return true;
+      if (answered == 0) {
+        _logFallback('probe gave no answer');
+        return false;
+      }
     }
+    if (_roundIsStale(generation, round)) return true;
     if (answered > 0 && authFailures == answered) {
-      AppLog.write('Location probe: the edge rejected the pass; using the TCP ping');
+      _logFallback('edge rejected the pass');
       _probeToken = null;
       _probeTokenUntil = null;
       return false;
@@ -806,19 +865,44 @@ class VpnController extends ChangeNotifier {
     return true;
   }
 
-  Future<void> _tcpRound(List<Location> batch, int generation) async {
+  /// Idle and signed in: a pass may be fetched for the probe. Connected, the
+  /// session's own pass is used; while a tunnel starts the edge is not reachable
+  /// directly.
+  bool get _canFetchProbePass => _signedIn && _session == null && !_connecting && !_tunStarting;
+
+  /// One pass through the account check (quota and errors handled there), at most
+  /// one in flight, 10 s at most. Null when a pass is now remembered, else why not.
+  Future<String?> _fetchProbePass() async {
+    var timedOut = false;
+    final fetch = _probePassFetch ??= (() async {
+      final check = _accountCheck = _checkAccount();
+      await check;
+    })().whenComplete(() => _probePassFetch = null);
+    await fetch.timeout(const Duration(seconds: 10), onTimeout: () {
+      timedOut = true;
+    });
+    if (timedOut) return 'timed out';
+    final until = _probeTokenUntil;
+    if (_probeToken != null && until != null && until.isAfter(_clock())) return null;
+    if (!_signedIn) return 'signed out';
+    if (_accountError != null) return _accountError;
+    if (_passQuotaRemaining == 0 && !_passQuotaUnlimited) return 'the free data is used up';
+    return 'no usable pass';
+  }
+
+  Future<void> _tcpRound(List<Location> batch, int generation, int round) async {
     await Future.wait(
       batch.map((location) async {
         int? ms;
         try {
           ms = await _ping(location.servers.first);
         } catch (_) {}
-        if (_disposed || generation != _generation) return;
+        if (_roundIsStale(generation, round)) return;
         // A ping that finishes after the tunnel came up went through the tunnel and
         // means nothing: keep the value measured before connecting (if any).
         final throughTunnel = _session != null || _tunStarting;
         if (!throughTunnel) {
-          _setDelay(location, ms);
+          _setDelay(location, ms, round);
         } else {
           _pinging.remove(location);
         }
@@ -832,7 +916,8 @@ class VpnController extends ChangeNotifier {
     final running = _pingFuture;
     if (running != null && _pinging.isNotEmpty) return running;
     if (_locations.isEmpty) return Future.value();
-    _orderPings = {for (final e in _pings.entries) locationKey(e.key): e.value};
+    if (!_orderHeld) _orderPings = {for (final e in _pings.entries) locationKey(e.key): e.value};
+    _orderHeld = false;
     final round = _pingFuture = _pingAll();
     return round;
   }
@@ -1152,7 +1237,7 @@ class VpnController extends ChangeNotifier {
   Future<Location> _measureFastest({required Location fallback}) async {
     if (_locations.every((l) => l.isRecommended)) return fallback;
     final at = _locationsAt;
-    final fresh = _delaysMeasured && at != null && _clock().difference(at) <= locationsMaxAge;
+    final fresh = (_delaysMeasured || _tcpHeldAfterDisconnect) && at != null && _clock().difference(at) <= locationsMaxAge;
     Location? best;
     var detail = 'cached';
     if (fresh && fastestLocation != null) {
@@ -1223,6 +1308,9 @@ class VpnController extends ChangeNotifier {
         location = await _measureFastest(fallback: location);
         if (await _abortIfCancelled(null, null)) return;
       }
+      // Recommended has what it needs (above); a round still running would now
+      // measure across the tunnel coming up, so it is dropped here.
+      _invalidateRound();
       // Android: the VPN permission dialog comes first, before any session or
       // quota is used. macOS: the network helper is installed here (the Mac
       // password, once). Nothing to do on Windows.
@@ -1325,6 +1413,8 @@ class VpnController extends ChangeNotifier {
   }
 
   Future<void> _doDisconnect({String? error}) async {
+    final complete = _delaysMeasured && _pinging.isEmpty;
+    _invalidateRound(stale: !_probedDelays);
     // Closing the window during "Connecting…": let the connect finish (it tears
     // itself down when it sees the flag).
     final pending = _connectFuture;
@@ -1337,7 +1427,8 @@ class VpnController extends ChangeNotifier {
     // Already disconnected (e.g. the tunnel and the session both reported the drop).
     if (session == null && tun == null && error != null) return;
     _keepQuota(session);
-    if (session != null) _rememberToken(session.token, session.tokenExpiresAt);
+    // Real expiry only: a pass of unknown age is not remembered (it must not look newer than it is).
+    if (session != null && session.tokenExpiresAt != null) _rememberToken(session.token, session.tokenExpiresAt);
     _session = null;
     _tun = null;
     _connectedLocation = null;
@@ -1355,6 +1446,13 @@ class VpnController extends ChangeNotifier {
     if (error != null) {
       _error = error;
       _dropped = true;
+    }
+    // Real delays stay good for their five minutes (a quick reconnect to
+    // Recommended uses them). Connection times only (no pass, no probe) are
+    // measured again on the next look at the Locations page.
+    if (!_probedDelays) {
+      _tcpHeldAfterDisconnect = complete;
+      _delaysMeasured = false;
     }
   }
 

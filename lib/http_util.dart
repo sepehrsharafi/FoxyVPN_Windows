@@ -96,6 +96,7 @@ class ControlPlane {
     sourceAddress = null;
     pinned.clear();
     closeH2Connections();
+    tunnelSocksPort = null;
   }
 
   /// A connection to [uri]'s host, TLS for https (offering [alpn]). While
@@ -135,6 +136,96 @@ class ControlPlane {
       }
     }
     throw lastError ?? SocketException('No usable address for $host');
+  }
+
+  /// Local SOCKS5 port of the running VPN tunnel (127.0.0.1, no auth), or null
+  /// when no session is connected. Set and cleared by the VPN session.
+  static int? tunnelSocksPort;
+
+  /// Connect timeout of the direct attempt to [uri]: short when a relay can take
+  /// over, so a blocked host does not hold the request up for 20 s.
+  static Duration directConnectTimeout(Uri uri) =>
+      ControlRelay.active != null && ControlRelay.carries(uri) ? const Duration(seconds: 8) : const Duration(seconds: 20);
+
+  /// A connection to [uri]'s host:port made through the SOCKS5 server on
+  /// 127.0.0.1:[socksPort] (CONNECT by domain name, so the tunnel resolves it),
+  /// then TLS for https. Every failure is a [SocketException] or [TlsException].
+  static Future<Socket> openTunnelSocket(Uri uri, int socksPort,
+      {List<String>? alpn,
+      Duration socksTimeout = const Duration(seconds: 5),
+      Duration tlsTimeout = const Duration(seconds: 8)}) async {
+    final host = uri.host;
+    final hostBytes = utf8.encode(host);
+    if (hostBytes.isEmpty || hostBytes.length > 255) throw SocketException('Bad host name for the tunnel');
+    final socket = await Socket.connect(InternetAddress.loopbackIPv4, socksPort, timeout: socksTimeout);
+    try {
+      socket.setOption(SocketOption.tcpNoDelay, true);
+      // A socket's stream can be listened to once; the broadcast view lets the handshake
+      // read first and leaves the socket paused for whoever takes it over.
+      final incoming = socket.asBroadcastStream(onListen: (s) => s.resume(), onCancel: (s) => s.pause());
+      await _socksConnect(socket, incoming, hostBytes, uri.port).timeout(socksTimeout,
+          onTimeout: () => throw SocketException('The tunnel did not connect to $host in time'));
+      if (uri.scheme != 'https') return await _freshStream(socket, incoming);
+      return await SecureSocket.secure(socket, host: host, supportedProtocols: alpn, context: securityContext)
+          .timeout(tlsTimeout, onTimeout: () => throw SocketException('TLS handshake with $host timed out'));
+    } catch (_) {
+      socket.destroy();
+      rethrow;
+    }
+  }
+
+  /// Plain http only (tests; real control-plane traffic is https): [socket]'s
+  /// stream was listened to during the SOCKS handshake and cannot be again, so
+  /// its bytes are piped through a loopback pair whose client end is returned.
+  static Future<Socket> _freshStream(Socket socket, Stream<List<int>> incoming) async {
+    final listener = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+    try {
+      final accepted = listener.first;
+      final client = await Socket.connect(InternetAddress.loopbackIPv4, listener.port);
+      final inner = await accepted;
+      unawaited(socket.addStream(inner).whenComplete(socket.destroy));
+      unawaited(inner.addStream(incoming).whenComplete(inner.destroy));
+      return client;
+    } finally {
+      await listener.close();
+    }
+  }
+
+  /// SOCKS5 greeting (no auth) and CONNECT to [host]:[port]; leaves the socket
+  /// positioned right after the reply.
+  static Future<void> _socksConnect(Socket socket, Stream<List<int>> incoming, List<int> host, int port) async {
+    final reader = StreamIterator<List<int>>(incoming);
+    var buffer = <int>[];
+    Future<List<int>> take(int n) async {
+      while (buffer.length < n) {
+        if (!await reader.moveNext()) throw SocketException('The tunnel closed the connection');
+        buffer = [...buffer, ...reader.current];
+      }
+      final out = buffer.sublist(0, n);
+      buffer = buffer.sublist(n);
+      return out;
+    }
+
+    try {
+      socket.add(const [5, 1, 0]);
+      final greeting = await take(2);
+      if (greeting[0] != 5 || greeting[1] != 0) throw SocketException('The tunnel refused the SOCKS handshake');
+      socket.add([5, 1, 0, 3, host.length, ...host, port >> 8, port & 0xff]);
+      final head = await take(4);
+      if (head[0] != 5) throw SocketException('Bad SOCKS reply from the tunnel');
+      if (head[1] != 0) throw SocketException('The tunnel could not connect (SOCKS code ${head[1]})');
+      final skip = switch (head[3]) {
+        1 => 4,
+        4 => 16,
+        3 => (await take(1))[0],
+        _ => throw SocketException('Bad SOCKS address type from the tunnel'),
+      };
+      await take(skip + 2);
+      if (buffer.isNotEmpty) throw SocketException('Unexpected data from the tunnel');
+    } finally {
+      // Leaving the broadcast stream pauses the socket (see openTunnelSocket).
+      await reader.cancel();
+    }
   }
 
   static Future<ConnectionTask<Socket>> _connect(Uri uri, Duration timeout) async {
@@ -366,6 +457,14 @@ Future<JsonResponse> _send(String method, Uri uri,
     if (body != null) 'content-type': 'application/json',
   };
   // Cookies belong to the target, whichever way the response came.
+  final tunnelPort = ControlPlane.tunnelSocksPort;
+  if (tunnelPort != null && _tunnelHosts.contains(uri.host.toLowerCase())) {
+    final viaTunnel = await _viaTunnel(tunnelPort, method, uri, requestHeaders, body);
+    if (viaTunnel != null) {
+      if (viaTunnel.headers['set-cookie'] case final setCookies?) cookies.store(uri, setCookies);
+      return viaTunnel;
+    }
+  }
   var fallbackRelay = ControlRelay.carries(uri) ? ControlRelay.active : null;
   JsonResponse? response;
   if (fallbackRelay != null && ControlRelay.relayFirst) {
@@ -378,6 +477,61 @@ Future<JsonResponse> _send(String method, Uri uri,
   response ??= await _directOrRelay(fallbackRelay, method, uri, requestHeaders, body);
   if (response.headers['set-cookie'] case final setCookies?) cookies.store(uri, setCookies);
   return response;
+}
+
+/// Hosts whose requests try the VPN tunnel first while it is up.
+const _tunnelHosts = {'vpn.mozilla.org', 'api.accounts.firefox.com', 'firefox.settings.services.mozilla.com'};
+
+final Map<String, DateTime> _tunnelLogged = {};
+
+/// Logs [line] at most once a minute per [key].
+void _tunnelLog(String key, String line) {
+  final now = DateTime.now();
+  final last = _tunnelLogged[key];
+  if (last != null && now.difference(last) < const Duration(minutes: 1)) return;
+  _tunnelLogged[key] = now;
+  AppLog.write(line);
+}
+
+/// The answer to [method] [uri] through the VPN tunnel's SOCKS port, or null
+/// (after one short log line) when it did not get an acceptable one; the caller
+/// then takes the normal route. HTTP 406 is left to the direct route's edge
+/// challenge, 421/451 mean the tunnel's exit is refused, and a server error on a
+/// read is worth another route.
+Future<JsonResponse?> _viaTunnel(
+    int socksPort, String method, Uri uri, Map<String, String> headers, List<int>? body) async {
+  HttpClient? client;
+  Socket? socket;
+  try {
+    socket = await ControlPlane.openTunnelSocket(uri, socksPort, alpn: const ['http/1.1']);
+    final opened = socket;
+    client = HttpClient(context: ControlPlane.securityContext)
+      ..findProxy = ((_) => 'DIRECT')
+      ..connectionFactory = (u, proxyHost, proxyPort) => Future.value(ConnectionTask.fromSocket(Future.value(opened), opened.destroy));
+    final request = await client.openUrl(method, uri);
+    headers.forEach(request.headers.set);
+    if (body != null) {
+      request.contentLength = body.length;
+      request.add(body);
+    }
+    final response = await request.close().timeout(const Duration(seconds: 20));
+    final text = await response.transform(utf8.decoder).join().timeout(const Duration(seconds: 20));
+    final status = response.statusCode;
+    final readOnly = method == 'GET' || method == 'HEAD';
+    if (status == 406 || status == 421 || status == 451 || (readOnly && status >= 500)) {
+      _tunnelLog('${uri.host}|status', 'HTTP $status from ${uri.host} through the VPN tunnel; using the normal route');
+      return null;
+    }
+    _tunnelLog('${uri.host}|ok', 'Sent $method ${uri.host}${uri.path} through the VPN tunnel');
+    return JsonResponse(status, text, ResponseHeaders.fromHttp(response.headers));
+  } on Object catch (e) {
+    if (e is! SocketException && e is! TlsException && e is! TimeoutException && e is! HttpException) rethrow;
+    _tunnelLog('${uri.host}|fail', 'The VPN tunnel route to ${uri.host} failed (${e.runtimeType}); using the normal route');
+    return null;
+  } finally {
+    client?.close(force: true);
+    socket?.destroy();
+  }
 }
 
 /// Mozilla's edge in some regions answers 451 to this host's API paths but lets
@@ -449,7 +603,7 @@ Future<JsonResponse?> _viaRelay(Uri relay, String method, Uri target, Map<String
 /// HTTP/1.1, one connection per request: plain http (tests) and hosts that did
 /// not offer HTTP/2.
 Future<JsonResponse> _sendH1(String method, Uri uri, Map<String, String> headers, List<int>? body) async {
-  const connectTimeout = Duration(seconds: 20);
+  final connectTimeout = ControlPlane.directConnectTimeout(uri);
   final client = HttpClient(context: ControlPlane.securityContext)..connectionTimeout = connectTimeout;
   if (ControlPlane.sourceAddress != null) {
     client

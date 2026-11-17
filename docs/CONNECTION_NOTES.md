@@ -35,6 +35,16 @@ Check with `git diff --stat 51e2c5c -- <files>` before every push.
 The Cloudflare Worker relay (`FOXY_RELAY_URL`, `relay/cloudflare/`) only carries control-plane
 requests: FxA, Guardian token and pass, and the server list. VPN traffic never goes through it.
 
+**Since 2026-11-15 (Iran):** `vpn.mozilla.org` and `firefox.settings.services.mozilla.com` time out
+at TCP level (no 451), while the data plane still works. So (2026-11-17):
+- While connected, requests to vpn.mozilla.org, api.accounts.firefox.com and
+  firefox.settings.services.mozilla.com go **through the VPN tunnel first** (SOCKS5 to the
+  session's own SOCKS port, `ControlPlane.tunnelSocksPort`, set by `VpnSession` in phase
+  `connected`). 406/421/451 (and 5xx on GET) or any failure fall back to the old path. Logs:
+  `... through the VPN tunnel`.
+- With a relay active, the direct connect timeout is 8 s instead of 20 s.
+- The first connect (no tunnel yet) still needs a relay when Guardian is blocked.
+
 ## Architecture now
 
 ```text
@@ -113,10 +123,13 @@ through each location's exit, like v2rayN.
     location shows "Unavailable".
   - Recommended on connect uses the cache if it is under 5 min old; otherwise one round, waited for
     at most 8 s (best answer so far), then Mozilla's pick if nothing answered.
-  - **Token:** no new control-plane traffic. The probe reuses a pass the app already holds: the one
-    from the startup / sign-in account check (`_checkAccount`), the running `VpnSession`'s token
-    while connected, or the last session's token after a disconnect. A pass is never fetched for
-    the probe.
+  - **Token:** the probe reuses a pass the app already holds: the one from the startup / sign-in
+    account check (`_checkAccount`), the running `VpnSession`'s token while connected, or the last
+    session's token after a disconnect (only with a known expiry). Since 2026-11-17: when idle,
+    signed in and none is usable, one account check runs for it (10 s cap); if that fails, TCP ping.
+    Every TCP fallback logs `Location delays: TCP ping instead of the real delay (<reason>)`.
+  - **Rounds** have an id; a new round clears the old values at its start (order held), stale
+    rounds' results are dropped, and a new probe run kills the one in flight (no more joining).
   - **Edge IP:** connected -> `VpnSession.upstreamAddress` (only the pinned IP has a bypass route).
     Disconnected -> resolved like connect does (`UpstreamSession.resolveIPv4` of the first
     server's host).

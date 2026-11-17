@@ -13,7 +13,6 @@ import 'package:http2/http2.dart';
 
 import 'http_util.dart';
 
-const _connectTimeout = Duration(seconds: 20);
 const _responseTimeout = Duration(seconds: 30);
 
 /// An unused connection is closed after this long (Go closes idle ones at 90 s).
@@ -61,7 +60,7 @@ Future<_Connection?> _connectionFor(Uri uri) async {
   final kept = _connections[key];
   if (kept != null && kept.usable) return kept;
   kept?.close();
-  final socket = await ControlPlane.openSocket(uri, _connectTimeout,
+  final socket = await ControlPlane.openSocket(uri, ControlPlane.directConnectTimeout(uri),
       alpn: const ['h2', 'http/1.1']);
   if (socket is SecureSocket && socket.selectedProtocol != 'h2') {
     socket.destroy();

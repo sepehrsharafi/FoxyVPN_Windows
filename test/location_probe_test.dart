@@ -121,15 +121,44 @@ void main() {
       expect(engine.killed, isTrue);
     });
 
-    test('one run at a time: a second call joins the first', () async {
-      final p = make();
-      final a = p.run(servers: ['a:1'], token: 't', onResult: (_, _) {});
-      final b = p.run(servers: ['a:1'], token: 't', onResult: (_, _) {});
-      expect(identical(a, b), isTrue);
+    test('a run started while another is in flight cancels it and gets the callbacks itself', () async {
+      final engines = [FakeEngine(), FakeEngine()];
+      var next = 0;
+      final p = LocationProbe(
+        findExecutable: () async => 'foxy-core.exe',
+        starter: (exe, args) async => engines[next++],
+        resolve: (host) async => InternetAddress('203.0.113.7'),
+        overallTimeout: const Duration(seconds: 5),
+      );
+      final oldGot = <String>[];
+      final newGot = <String, ProbeResult>{};
+      final a = p.run(servers: ['a:1'], token: 'old', onResult: (s, _) => oldGot.add(s));
       await pumpEventQueue();
-      engine.event({'type': 'probe', 'server': 'a:1', 'ms': 1});
-      engine.event({'type': 'probe_done'});
-      await a;
+      expect(next, 1);
+      final b = p.run(servers: ['a:1', 'b:1'], token: 'new', onResult: (s, r) => newGot[s] = r);
+      await a; // cancelled: returns without an error and without callbacks
+      expect(engines[0].killed, isTrue, reason: 'one probe process at a time');
+      await pumpEventQueue();
+      expect(next, 2);
+      expect(engines[1].stdinLines[0], '{"token":"new"}');
+      engines[1].event({'type': 'probe', 'server': 'a:1', 'ms': 7});
+      engines[1].event({'type': 'probe', 'server': 'b:1', 'ms': 9});
+      engines[1].event({'type': 'probe_done'});
+      await b;
+      expect(newGot['a:1']!.ms, 7);
+      expect(newGot['b:1']!.ms, 9);
+      expect(oldGot, isEmpty);
+    });
+
+    test('cancel() stops the run in flight without an error', () async {
+      final p = make();
+      final got = <String>[];
+      final run = p.run(servers: ['a:1'], token: 't', onResult: (s, _) => got.add(s));
+      await pumpEventQueue();
+      p.cancel();
+      await run;
+      expect(engine.killed, isTrue);
+      expect(got, isEmpty);
     });
   });
 }

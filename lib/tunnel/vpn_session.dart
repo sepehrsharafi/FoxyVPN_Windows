@@ -158,6 +158,7 @@ class VpnSession {
   Future<void> stop() async {
     if (_stopped) return;
     _stopped = true;
+    _unpublishTunnelPort();
     _renewTimer?.cancel();
     _setPhase(VpnPhase.stopped);
     unawaited(_phases.close());
@@ -471,6 +472,22 @@ class VpnSession {
   void _setPhase(VpnPhase phase) {
     if (_phase == phase) return;
     _phase = phase;
+    if (phase == VpnPhase.connected && !_stopped) {
+      // Control-plane requests may now go through the tunnel's SOCKS port.
+      _publishedPort = socksPort;
+      ControlPlane.tunnelSocksPort = _publishedPort;
+    } else {
+      _unpublishTunnelPort();
+    }
     if (!_phases.isClosed) _phases.add(phase);
+  }
+
+  /// The port this session put in [ControlPlane.tunnelSocksPort], if it is still there.
+  int? _publishedPort;
+
+  void _unpublishTunnelPort() {
+    final port = _publishedPort;
+    _publishedPort = null;
+    if (port != null && ControlPlane.tunnelSocksPort == port) ControlPlane.tunnelSocksPort = null;
   }
 }
