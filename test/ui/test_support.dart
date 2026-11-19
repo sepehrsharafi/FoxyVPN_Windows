@@ -10,6 +10,7 @@ import 'package:foxyvpn/servers.dart';
 import 'package:foxyvpn/ui/app.dart';
 import 'package:foxyvpn/ui/widgets/odometer_text.dart';
 import 'package:foxyvpn/ui/widgets/tabular_text.dart';
+import 'package:foxyvpn/usage_store.dart';
 import 'package:foxyvpn/vpn_controller.dart';
 
 /// Loads the bundled Urbanist cuts (assets/fonts/urbanist) so text has real
@@ -384,6 +385,15 @@ class FakeVpnController extends ChangeNotifier implements VpnController {
 
   @override
   Future<void> shutdown() async {}
+
+  @override
+  UsageStore usage = UsageStore();
+
+  @override
+  Future<void> refreshUsage() async {}
+
+  @override
+  Future<Uint8List?> appIcon(String id, int size) async => null;
 
   @override
   void openLog() => calls.add('openLog');

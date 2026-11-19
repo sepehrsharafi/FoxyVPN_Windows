@@ -105,4 +105,25 @@ class AndroidBridge {
       _method.invokeMethod<void>('securePut', {'key': key, 'value': value});
 
   Future<void> secureDelete(String key) => _method.invokeMethod<void>('secureDelete', {'key': key});
+
+  /// Bytes per app since the last call (AppUsageMonitor.kt), or null when
+  /// Android can't tell apps apart for a VPN (before Android 10).
+  Future<List<({String id, String name, int up, int down})>?> takeAppUsage() async {
+    final raw = await _method.invokeMethod<List<Object?>>('takeAppUsage');
+    if (raw == null) return null;
+    return [
+      for (final e in raw)
+        if (e is Map)
+          (
+            id: '${e['id'] ?? 'other'}',
+            name: '${e['name'] ?? ''}',
+            up: (e['up'] as num?)?.toInt() ?? 0,
+            down: (e['down'] as num?)?.toInt() ?? 0,
+          ),
+    ];
+  }
+
+  /// An installed app's icon as PNG, [size] px square, or null.
+  Future<Uint8List?> appIcon(String id, int size) =>
+      _method.invokeMethod<Uint8List>('appIcon', {'id': id, 'size': size});
 }

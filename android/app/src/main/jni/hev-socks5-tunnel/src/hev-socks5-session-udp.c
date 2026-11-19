@@ -27,6 +27,7 @@
 #include "hev-config-const.h"
 #include "hev-socks5-tunnel.h"
 
+#include "hev-flow-stats.h"
 #include "hev-socks5-session-udp.h"
 
 typedef struct _HevSocks5UDPFrame HevSocks5UDPFrame;
@@ -94,6 +95,13 @@ hev_socks5_session_udp_fwd_f (HevSocks5SessionUDP *self, unsigned int num)
         return -1;
     }
 
+    if (self->data.flow) {
+        uint64_t sent = 0;
+        for (i = 0; i < res; i++)
+            sent += msgv[i].len;
+        hev_flow_stats_add (self->data.flow, sent, 0);
+    }
+
     for (i = 0; i < res; i++) {
         node = hev_list_first (&self->frame_list);
         frame = container_of (node, HevSocks5UDPFrame, node);
@@ -126,6 +134,13 @@ hev_socks5_session_udp_fwd_b (HevSocks5SessionUDP *self, unsigned int num)
             return 0;
         LOG_D ("%p socks5 session udp fwd b recv", self);
         return -1;
+    }
+
+    if (self->data.flow) {
+        uint64_t got = 0;
+        for (i = 0; i < res; i++)
+            got += msgv[i].len;
+        hev_flow_stats_add (self->data.flow, 0, got);
     }
 
     for (i = 0; i < res; i++) {

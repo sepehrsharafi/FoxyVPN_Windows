@@ -22,6 +22,10 @@ object HevSocks5Tunnel {
     private external fun TProxyIsRunning(): Boolean
     private external fun TProxyGetStats(): LongArray
 
+    // FoxyVPN additions (hev-flow-stats.c): per-connection byte counts.
+    private external fun TProxyDrainFlows(waitMs: Int): LongArray
+    private external fun TProxyEnableFlows(on: Boolean)
+
     init {
         System.loadLibrary("hev-socks5-tunnel")
     }
@@ -49,6 +53,26 @@ object HevSocks5Tunnel {
         } catch (t: Throwable) {
             false
         }
+
+    /**
+     * Waits up to [waitMs] for a new connection, then returns one record of
+     * [FLOW_RECORD] longs per connection with news (see [AppUsageMonitor]).
+     */
+    fun drainFlows(waitMs: Int): LongArray =
+        try {
+            TProxyDrainFlows(waitMs)
+        } catch (t: Throwable) {
+            LongArray(0)
+        }
+
+    fun enableFlows(on: Boolean) {
+        try {
+            TProxyEnableFlows(on)
+        } catch (_: Throwable) {
+        }
+    }
+
+    const val FLOW_RECORD = 10
 
     /** tx packets, tx bytes, rx packets, rx bytes. */
     fun stats(): LongArray =

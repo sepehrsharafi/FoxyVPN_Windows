@@ -27,6 +27,7 @@ struct _HevSocks5SessionData
     HevListNode node;
     HevTask *task;
     HevSocks5Session *self;
+    int flow; /* FoxyVPN: hev-flow-stats handle, 0 = not counted */
 };
 
 struct _HevSocks5SessionIface

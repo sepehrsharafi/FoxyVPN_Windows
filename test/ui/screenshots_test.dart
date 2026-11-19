@@ -11,6 +11,8 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:foxyvpn/fxa.dart';
 import 'package:foxyvpn/ui/widgets/power_switch.dart';
+import 'package:foxyvpn/ui/widgets/usage_chart.dart';
+import 'package:foxyvpn/usage_store.dart';
 import 'package:foxyvpn/vpn_controller.dart';
 
 import 'test_support.dart';
@@ -479,6 +481,86 @@ void main() {
       if (!fonts) return;
       final c = withPings()..quotaRemaining = 0;
       await scene(tester, '19_account_no_data', c, act: (t) => tapAndSlide(t, find.byTooltip('Account')));
+    });
+
+    UsageStore seeded() {
+      var t = DateTime.now();
+      final s = UsageStore(clock: () => t);
+      final end = DateTime.now();
+      const mb = 1024 * 1024;
+      final pattern = [420, 380, 910, 260, 1300, 720, 180, 640, 1100, 520, 300, 860, 1500, 690];
+      for (var i = 0; i < 40; i++) {
+        t = DateTime(end.year, end.month, end.day - i, 9 + i % 12);
+        final v = pattern[i % pattern.length];
+        s.addTotals(v * mb ~/ 9, v * mb);
+      }
+      for (var h = 0; h <= end.hour; h++) {
+        t = DateTime(end.year, end.month, end.day, h);
+        s.addTotals((h * 7 % 30) * mb ~/ 4, (h * 13 % 40 + 2) * mb);
+      }
+      t = end;
+      s.addApp('com.google.android.youtube', 'YouTube', 120 * mb, 2900 * mb);
+      s.addApp('org.telegram.messenger', 'Telegram', 260 * mb, 1250 * mb);
+      s.addApp('com.instagram.android', 'Instagram', 90 * mb, 980 * mb);
+      s.addApp('org.mozilla.firefox', 'Firefox', 60 * mb, 610 * mb);
+      s.addApp('com.spotify.music', 'Spotify', 8 * mb, 340 * mb);
+      s.addApp('system:DNS', 'DNS', 3 * mb, 9 * mb);
+      s.addApp('com.whatsapp', 'WhatsApp', 40 * mb, 120 * mb);
+      s.addApp('other', 'Other', 2 * mb, 5 * mb);
+      return s;
+    }
+
+    testWidgets('usage page (week)', (tester) async {
+      if (!fonts) return;
+      final c = FakeVpnController()
+        ..quotaUnlimited = true
+        ..usage = seeded();
+      await scene(tester, '40_usage_week', c, act: (t) => tapAndSlide(t, find.byTooltip('Usage')));
+    });
+
+    testWidgets('usage page (today, a bar selected)', (tester) async {
+      if (!fonts) return;
+      final c = FakeVpnController()
+        ..quotaUnlimited = true
+        ..usage = seeded();
+      await scene(
+        tester,
+        '41_usage_today_selected',
+        c,
+        act: (t) async {
+          await tapAndSlide(t, find.byTooltip('Usage'));
+          await t.tap(find.text('Today'));
+          await t.pump(const Duration(milliseconds: 700));
+          await t.tap(find.byType(UsageBarChart), warnIfMissed: false);
+          await t.pump(const Duration(milliseconds: 700));
+        },
+      );
+    });
+
+    testWidgets('usage page (month)', (tester) async {
+      if (!fonts) return;
+      final c = FakeVpnController()
+        ..quotaUnlimited = true
+        ..usage = seeded();
+      await scene(
+        tester,
+        '42_usage_month',
+        c,
+        act: (t) async {
+          await tapAndSlide(t, find.byTooltip('Usage'));
+          await t.tap(find.text('Month'));
+          await t.pump(const Duration(milliseconds: 700));
+        },
+      );
+    });
+
+    testWidgets('home and account, unlimited', (tester) async {
+      if (!fonts) return;
+      final c = FakeVpnController()
+        ..quotaUnlimited = true
+        ..usage = seeded();
+      await scene(tester, '43_home_unlimited', c);
+      await scene(tester, '44_account_unlimited', c, act: (t) => tapAndSlide(t, find.byTooltip('Account')));
     });
   });
 }

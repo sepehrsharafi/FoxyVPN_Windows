@@ -25,6 +25,7 @@
 #include "hev-config-const.h"
 #include "hev-socks5-tunnel.h"
 
+#include "hev-flow-stats.h"
 #include "hev-socks5-session-tcp.h"
 
 static int
@@ -68,6 +69,7 @@ tcp_splice_f (HevSocks5SessionTCP *self)
             else
                 res = -1;
         } else {
+            hev_flow_stats_add (self->data.flow, s, 0);
             hev_task_mutex_lock (self->mutex);
             self->queue = pbuf_free_header (self->queue, s);
             if (self->pcb)
@@ -98,6 +100,7 @@ tcp_splice_b (HevSocks5SessionTCP *self)
             else
                 res = -1;
         } else {
+            hev_flow_stats_add (self->data.flow, 0, s);
             hev_ring_buffer_write_finish (self->buffer, s);
         }
     } else {

@@ -31,6 +31,7 @@ import 'tunnel/location_probe.dart';
 import 'tunnel/speed_meter.dart';
 import 'tunnel/vpn_session.dart';
 import 'tunnel/windows_tun.dart';
+import 'usage_store.dart';
 
 enum ConnState { preparing, idle, connecting, connected, reconnecting, disconnecting }
 
@@ -82,6 +83,7 @@ class VpnController extends ChangeNotifier {
     TunBackendStarter? startBackend,
     Future<void> Function()? prepareTun,
     AndroidBridge? androidBridge,
+    UsageStore? usage,
     this.cancelWait = connectCancelWait,
     this.exitCheckDelay = const Duration(seconds: 2),
     this.quickConnectTimeout = const Duration(seconds: 8),
@@ -100,7 +102,8 @@ class VpnController extends ChangeNotifier {
        _startSession = startSession ?? VpnSession.start,
        _startTun = startBackend ?? _wrapWindows(startTun) ?? startPlatformTun,
        _prepareTun = prepareTun ?? (startBackend != null || startTun != null ? null : platformPrepare),
-       _android = androidBridge ?? (Host.isAndroid ? AndroidBridge.instance : null) {
+       _android = androidBridge ?? (Host.isAndroid ? AndroidBridge.instance : null),
+       usage = usage ?? UsageStore.forDevice() {
     _signedIn = _account.hasSavedSignIn;
     _selectedKey = _settings.selectedLocation;
     ControlRelay.userUrl = _settings.relayUrl ?? '';
@@ -374,6 +377,8 @@ class VpnController extends ChangeNotifier {
     _disposed = true;
     _androidSub?.cancel();
     _statsTimer?.cancel();
+    _usageTimer?.cancel();
+    unawaited(usage.flush());
     _notifySoonTimer?.cancel();
     _stats.dispose();
     _onScreen.dispose();
@@ -530,6 +535,7 @@ class VpnController extends ChangeNotifier {
   int? get quotaRemaining => _session?.quotaRemaining ?? _passQuotaRemaining;
   int? get quotaMax => _session?.quotaMax ?? _passQuotaMax;
   DateTime? get quotaResetsAt => _session?.quotaResetsAt ?? _passQuotaResetsAt;
+
   /// Mozilla reports no monthly cap for this account right now.
   bool get quotaUnlimited => _session?.quotaUnlimited ?? _passQuotaUnlimited;
 
@@ -878,9 +884,12 @@ class VpnController extends ChangeNotifier {
       final check = _accountCheck = _checkAccount();
       await check;
     })().whenComplete(() => _probePassFetch = null);
-    await fetch.timeout(const Duration(seconds: 10), onTimeout: () {
-      timedOut = true;
-    });
+    await fetch.timeout(
+      const Duration(seconds: 10),
+      onTimeout: () {
+        timedOut = true;
+      },
+    );
     if (timedOut) return 'timed out';
     final until = _probeTokenUntil;
     if (_probeToken != null && until != null && until.isAfter(_clock())) return null;
@@ -1066,6 +1075,9 @@ class VpnController extends ChangeNotifier {
     if (!visible) {
       _statsTimer?.cancel();
       _statsTimer = null;
+      // The app may be closed from the background: keep what was counted.
+      _recordUsage();
+      unawaited(usage.flush());
     } else if (session != null && _statsTimer == null) {
       _speed.reset();
       _speed.sample(session.bytesUp, session.bytesDown, _clock()); // new baseline
@@ -1086,12 +1098,103 @@ class VpnController extends ChangeNotifier {
     if (!changed && up == _tickedUp && down == _tickedDown) return;
     _tickedUp = up;
     _tickedDown = down;
+    _recordUsage(); // the Usage numbers move live while the app is on screen
     _stats.tick();
   }
 
   // The byte counts the stats last ticked with.
   int _tickedUp = -1;
   int _tickedDown = -1;
+
+  // ---------------------------------------------------------------------------
+  // Usage history (kept on this device only; see usage_store.dart)
+  // ---------------------------------------------------------------------------
+
+  /// What went through the VPN on this device, per day / hour (and per app on Android 10+).
+  final UsageStore usage;
+
+  Timer? _usageTimer;
+  VpnSession? _usageSession;
+  int _usageUp = 0;
+  int _usageDown = 0;
+
+  /// Adds what the session moved since the last call. Only reads its counters;
+  /// never throws into the connection's path.
+  void _recordUsage() {
+    final session = _session;
+    if (session == null) return;
+    try {
+      if (!identical(session, _usageSession)) {
+        _usageSession = session;
+        _usageUp = 0; // a new session counts from zero
+        _usageDown = 0;
+      }
+      final up = session.bytesUp;
+      final down = session.bytesDown;
+      // A counter that went down (an engine of the pool was replaced) adds nothing.
+      final dUp = up > _usageUp ? up - _usageUp : 0;
+      final dDown = down > _usageDown ? down - _usageDown : 0;
+      _usageUp = up;
+      _usageDown = down;
+      usage.addTotals(dUp, dDown);
+    } catch (_) {}
+  }
+
+  void _startUsage() {
+    _usageTimer?.cancel();
+    _usageTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+      _recordUsage();
+      unawaited(refreshUsage());
+    });
+  }
+
+  /// Before the session is dropped: the last bytes, then the file.
+  void _stopUsage() {
+    _usageTimer?.cancel();
+    _usageTimer = null;
+    _recordUsage();
+    _usageSession = null;
+    unawaited(usage.flush());
+    // Android hands over the per-app counts of the last connections once its tunnel has stopped.
+    if (_android != null) {
+      Timer(const Duration(seconds: 3), () {
+        if (!_disposed) unawaited(refreshUsage().then((_) => usage.flush()));
+      });
+    }
+  }
+
+  bool _appUsageBusy = false;
+
+  /// Brings the numbers up to date now (the Usage page calls this while open):
+  /// the session's bytes, and on Android what each app moved.
+  Future<void> refreshUsage() async {
+    _recordUsage();
+    final android = _android;
+    if (android == null || _appUsageBusy) return;
+    _appUsageBusy = true;
+    try {
+      final apps = await android.takeAppUsage();
+      if (apps == null || _disposed) return;
+      for (final a in apps) {
+        usage.addApp(a.id, a.name, a.up, a.down);
+      }
+    } catch (_) {
+      // Per-app numbers are optional; the totals do not depend on them.
+    } finally {
+      _appUsageBusy = false;
+    }
+  }
+
+  /// Android: an app's icon (PNG) for the Usage page; null elsewhere.
+  Future<Uint8List?> appIcon(String id, int size) async {
+    final android = _android;
+    if (android == null) return null;
+    try {
+      return await android.appIcon(id, size);
+    } catch (_) {
+      return null;
+    }
+  }
 
   Timer? _notifySoonTimer;
 
@@ -1237,7 +1340,8 @@ class VpnController extends ChangeNotifier {
   Future<Location> _measureFastest({required Location fallback}) async {
     if (_locations.every((l) => l.isRecommended)) return fallback;
     final at = _locationsAt;
-    final fresh = (_delaysMeasured || _tcpHeldAfterDisconnect) && at != null && _clock().difference(at) <= locationsMaxAge;
+    final fresh =
+        (_delaysMeasured || _tcpHeldAfterDisconnect) && at != null && _clock().difference(at) <= locationsMaxAge;
     Location? best;
     var detail = 'cached';
     if (fresh && fastestLocation != null) {
@@ -1390,6 +1494,7 @@ class VpnController extends ChangeNotifier {
     _speed.reset();
     _speed.sample(session.bytesUp, session.bytesDown, _clock()); // baseline
     if (_onScreen.value) _statsTimer = Timer.periodic(statsInterval, (_) => _onStatsTick());
+    _startUsage();
     _scheduleExitCheck(session);
     _connecting = false;
     _notify();
@@ -1429,6 +1534,7 @@ class VpnController extends ChangeNotifier {
     _keepQuota(session);
     // Real expiry only: a pass of unknown age is not remembered (it must not look newer than it is).
     if (session != null && session.tokenExpiresAt != null) _rememberToken(session.token, session.tokenExpiresAt);
+    _stopUsage();
     _session = null;
     _tun = null;
     _connectedLocation = null;

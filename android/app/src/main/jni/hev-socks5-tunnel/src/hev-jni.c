@@ -21,6 +21,7 @@
 #include "hev-main.h"
 
 #include "hev-jni.h"
+#include "hev-flow-stats.h"
 
 /* clang-format off */
 #ifndef PKGNAME
@@ -55,6 +56,9 @@ static jboolean native_start_service (JNIEnv *env, jobject thiz,
 static jboolean native_stop_service (JNIEnv *env, jobject thiz);
 static jboolean native_is_running (JNIEnv *env, jobject thiz);
 static jlongArray native_get_stats (JNIEnv *env, jobject thiz);
+static jlongArray native_drain_flows (JNIEnv *env, jobject thiz,
+                                      jint wait_ms);
+static void native_enable_flows (JNIEnv *env, jobject thiz, jboolean on);
 
 static JNINativeMethod native_methods[] = {
     { "TProxyStartService", "(Ljava/lang/String;I)Z",
@@ -62,6 +66,8 @@ static JNINativeMethod native_methods[] = {
     { "TProxyStopService", "()Z", (void *)native_stop_service },
     { "TProxyIsRunning", "()Z", (void *)native_is_running },
     { "TProxyGetStats", "()[J", (void *)native_get_stats },
+    { "TProxyDrainFlows", "(I)[J", (void *)native_drain_flows },
+    { "TProxyEnableFlows", "(Z)V", (void *)native_enable_flows },
 };
 
 static void
@@ -147,6 +153,9 @@ native_start_service (JNIEnv *env, jobject thiz, jstring config_path, jint fd)
         goto exit;
     }
 
+    /* FoxyVPN: connections of an earlier run are over. */
+    hev_flow_stats_close_all ();
+
     atomic_store_explicit (&is_running, 1, memory_order_release);
     res = pthread_create (&work_thread, NULL, thread_handler, tdata);
     if (res != 0) {
@@ -208,6 +217,32 @@ native_get_stats (JNIEnv *env, jobject thiz)
     (*env)->SetLongArrayRegion (env, res, 0, 4, array);
 
     return res;
+}
+
+/* FoxyVPN: per-connection byte counts (see hev-flow-stats.h). One caller. */
+static jlong flow_buffer[2048 * HEV_FLOW_RECORD_LONGS];
+
+static jlongArray
+native_drain_flows (JNIEnv *env, jobject thiz, jint wait_ms)
+{
+    int max = sizeof (flow_buffer) / sizeof (flow_buffer[0]) /
+              HEV_FLOW_RECORD_LONGS;
+    int count, len;
+    jlongArray res;
+
+    count = hev_flow_stats_drain ((int64_t *)flow_buffer, max, wait_ms);
+    len = count * HEV_FLOW_RECORD_LONGS;
+    res = (*env)->NewLongArray (env, len);
+    if (res && len)
+        (*env)->SetLongArrayRegion (env, res, 0, len, flow_buffer);
+
+    return res;
+}
+
+static void
+native_enable_flows (JNIEnv *env, jobject thiz, jboolean on)
+{
+    hev_flow_stats_enable (on ? 1 : 0);
 }
 
 #endif /* ANDROID */

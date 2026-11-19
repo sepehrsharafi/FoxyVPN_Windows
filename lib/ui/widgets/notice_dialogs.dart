@@ -409,6 +409,83 @@ class DropDialog extends StatelessWidget {
 }
 
 // ---------------------------------------------------------------------------
+// A yes / no question
+// ---------------------------------------------------------------------------
+
+/// True when the person pressed [confirmLabel].
+Future<bool> showConfirmDialog(
+  BuildContext context, {
+  required String title,
+  required String message,
+  required String confirmLabel,
+  FoxyIcons icon = FoxyIcons.alert,
+  Color iconColor = FoxyColors.danger,
+}) async {
+  final yes = await Navigator.of(context).push<bool>(
+    FoxyDialogRoute(
+      builder: (context) {
+        void answer(bool v) => Navigator.of(context).pop(v);
+        return _DialogFrame(
+          icon: icon,
+          iconColor: iconColor,
+          title: title,
+          onClose: () => answer(false),
+          body: Text(message, style: FoxyText.body.copyWith(fontSize: 15, height: 1.45)),
+          secondary: AppButton(
+            label: 'Cancel',
+            kind: AppButtonKind.secondary,
+            autofocus: true,
+            onPressed: () => answer(false),
+          ),
+          primary: AppButton(label: confirmLabel, onPressed: () => answer(true)),
+        );
+      },
+    ),
+  );
+  return yes ?? false;
+}
+
+// ---------------------------------------------------------------------------
+// Sign out while connected
+// ---------------------------------------------------------------------------
+
+const signOutBlockedTitle = 'Disconnect to sign out';
+
+/// Opened when Sign out is tapped while the VPN is on (or still connecting).
+Future<void> showSignOutBlockedDialog(BuildContext context, VpnController controller) =>
+    Navigator.of(context).push<void>(FoxyDialogRoute(builder: (_) => SignOutBlockedDialog(controller: controller)));
+
+class SignOutBlockedDialog extends StatelessWidget {
+  const SignOutBlockedDialog({super.key, required this.controller});
+
+  final VpnController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    void close() => Navigator.of(context).pop();
+    return _DialogFrame(
+      icon: FoxyIcons.signOut,
+      iconColor: FoxyColors.danger,
+      title: signOutBlockedTitle,
+      onClose: close,
+      body: Text(
+        'The VPN is on. Disconnect first, then you can sign out.',
+        style: FoxyText.body.copyWith(fontSize: 15, height: 1.45),
+      ),
+      secondary: AppButton(label: 'Cancel', kind: AppButtonKind.secondary, onPressed: close),
+      primary: AppButton(
+        label: 'Disconnect',
+        autofocus: true,
+        onPressed: () {
+          close();
+          unawaited(controller.disconnect().catchError((Object _) {}));
+        },
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Mozilla's image captcha (sign-in)
 // ---------------------------------------------------------------------------
 
@@ -465,10 +542,8 @@ class _CaptchaDialogState extends State<CaptchaDialog> {
                 height: 90,
                 fit: BoxFit.contain,
                 gaplessPlayback: true,
-                errorBuilder: (_, _, _) => const SizedBox(
-                  height: 90,
-                  child: Center(child: Text('The image could not be shown.')),
-                ),
+                errorBuilder: (_, _, _) =>
+                    const SizedBox(height: 90, child: Center(child: Text('The image could not be shown.'))),
               ),
             ),
           ),

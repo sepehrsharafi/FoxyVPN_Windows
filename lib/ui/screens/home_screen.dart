@@ -19,8 +19,10 @@ import '../widgets/pressable.dart';
 import '../widgets/signal_bars.dart';
 import '../widgets/status_pill.dart';
 import '../widgets/tabular_text.dart';
+import '../widgets/usage_chart.dart';
 import 'account_screen.dart';
 import 'locations_screen.dart';
+import 'usage_screen.dart';
 
 /// The main screen, top to bottom: data caption and avatar, the big session
 /// timer with the status pill, the power switch, and the location / speed panel.
@@ -62,11 +64,7 @@ class _HomeScreenState extends State<HomeScreen> {
     ];
     if (fresh.isEmpty) return;
     final px = (LocationsScreen.flagSize * MediaQuery.devicePixelRatioOf(context)).round();
-    unawaited(
-      FlagCache.warmUp([
-        for (final code in fresh) (code, px, px),
-      ]),
-    );
+    unawaited(FlagCache.warmUp([for (final code in fresh) (code, px, px)]));
   }
 
   @override
@@ -93,6 +91,10 @@ class _HomeScreenState extends State<HomeScreen> {
 
   void _openAccount(BuildContext context) {
     unawaited(_push.push(context, (_) => AccountScreen(controller: controller)));
+  }
+
+  void _openUsage(BuildContext context) {
+    unawaited(_push.push(context, (_) => UsageScreen(controller: controller)));
   }
 
   void _onSwitch(BuildContext context) {
@@ -168,6 +170,7 @@ class _HomeScreenState extends State<HomeScreen> {
               _TopRow(
                 controller: c,
                 onAvatar: () => _openAccount(context),
+                onUsage: () => _openUsage(context),
                 onConflicts: _notices.showConflicts,
               ),
               _TimerBlock(controller: c),
@@ -207,16 +210,17 @@ class _HomeScreenState extends State<HomeScreen> {
 // ---------------------------------------------------------------------------
 
 class _TopRow extends StatelessWidget {
-  const _TopRow({required this.controller, required this.onAvatar, required this.onConflicts});
+  const _TopRow({required this.controller, required this.onAvatar, required this.onUsage, required this.onConflicts});
 
   final VpnController controller;
   final VoidCallback onAvatar;
+  final VoidCallback onUsage;
   final VoidCallback onConflicts;
 
   /// "11.0 GB left" (the reset date lives on the Account page), or the
   /// problem, in danger red.
   ({String text, bool problem})? _caption() {
-    if (controller.quotaUnlimited) return (text: 'Unlimited data', problem: false);
+    // Unlimited: the usage pill takes this place (see build).
     final left = controller.quotaRemaining;
     if (left != null) {
       if (left <= 0) return (text: 'No data left', problem: true);
@@ -237,26 +241,32 @@ class _TopRow extends StatelessWidget {
         child: Row(
           children: [
             Expanded(
-              // The quota counts down live while connected (the stats tick).
-              child: ListenableBuilder(
-                listenable: controller.stats,
-                builder: (context, _) {
-                  final caption = _caption();
-                  return caption == null
-                      ? const SizedBox.shrink()
-                      : Tooltip(
-                          message: caption.text,
-                          child: Text(
-                            caption.text,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: FoxyText.caption.copyWith(
-                              color: caption.problem ? FoxyColors.danger : FoxyColors.textDim,
-                            ),
-                          ),
-                        );
-                },
-              ),
+              // Unlimited data: what went through the VPN this month instead (live).
+              child: controller.quotaUnlimited
+                  ? Align(
+                      alignment: Alignment.centerLeft,
+                      child: _UsagePill(controller: controller, onTap: onUsage),
+                    )
+                  // The quota counts down live while connected (the stats tick).
+                  : ListenableBuilder(
+                      listenable: controller.stats,
+                      builder: (context, _) {
+                        final caption = _caption();
+                        return caption == null
+                            ? const SizedBox.shrink()
+                            : Tooltip(
+                                message: caption.text,
+                                child: Text(
+                                  caption.text,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: FoxyText.caption.copyWith(
+                                    color: caption.problem ? FoxyColors.danger : FoxyColors.textDim,
+                                  ),
+                                ),
+                              );
+                      },
+                    ),
             ),
             const SizedBox(width: 8),
             // The slot is always reserved, so the icon appearing moves nothing.
@@ -274,6 +284,58 @@ class _TopRow extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// "⇅ 3.42 GB this month": a pill that opens Usage.
+class _UsagePill extends StatelessWidget {
+  const _UsagePill({required this.controller, required this.onTap});
+
+  final VpnController controller;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: controller.usage,
+      builder: (context, _) {
+        final month = controller.usage.thisMonth;
+        final text = month > 0 ? '${formatBytes(month)} this month' : 'Usage';
+        return Pressable(
+          onTap: onTap,
+          semanticLabel: month > 0 ? '$text. Open usage' : 'Open usage',
+          tooltip: 'Usage',
+          builder: (context, s) => AnimatedContainer(
+            duration: FoxySpace.fast,
+            height: 32,
+            padding: const EdgeInsets.only(left: 10, right: 12),
+            decoration: BoxDecoration(
+              color: s.pressed ? FoxyColors.line : (s.hovered ? FoxyColors.surfaceHi : FoxyColors.surface),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(
+                color: s.focused ? FoxyColors.focus : (s.hovered ? FoxyColors.lineHi : FoxyColors.line),
+                width: s.focused ? 1.5 : 1,
+              ),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const UsageGlyph(size: 15),
+                const SizedBox(width: 8),
+                Flexible(
+                  child: Text(
+                    text,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: FoxyText.caption.copyWith(color: s.hovered ? FoxyColors.text : FoxyColors.textDim),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 }
@@ -692,10 +754,7 @@ class _LocationRow extends StatelessWidget {
             ),
             // Always there. While connected this is the last ping measured before
             // connecting (a ping through the tunnel would mean nothing).
-            if (l != null) ...[
-              const SizedBox(width: 8),
-              PingReadout(ms: c.pingOf(l), measuring: c.isPinging(l)),
-            ],
+            if (l != null) ...[const SizedBox(width: 8), PingReadout(ms: c.pingOf(l), measuring: c.isPinging(l))],
             const SizedBox(width: 12),
             Text(
               'Change',

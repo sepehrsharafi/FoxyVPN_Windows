@@ -8,6 +8,7 @@ import android.os.Looper
 import android.util.Log
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
+import com.foxyvpn.app.vpn.AppUsageMonitor
 import com.foxyvpn.app.vpn.FoxyTileService
 import com.foxyvpn.app.vpn.FoxyVpnService
 import com.foxyvpn.app.vpn.TileStatus
@@ -57,6 +58,9 @@ object Bridge {
 
     @Volatile
     private var autoStartPending = false
+
+    /** uid -> {id, name} of the per-app usage (main thread). */
+    private val appNames = HashMap<Int, Map<String, String>>()
 
     fun attach(engine: FlutterEngine, context: Context) {
         appContext = context
@@ -172,6 +176,26 @@ object Bridge {
                     val pending = autoStartPending
                     autoStartPending = false
                     result.success(pending)
+                }
+                "takeAppUsage" -> {
+                    if (!AppUsageMonitor.supported) {
+                        result.success(null)
+                    } else {
+                        result.success(
+                            AppUsageMonitor.take().map { (uid, up, down) ->
+                                val app = appNames.getOrPut(uid.toInt()) { AppUsageMonitor.describe(context, uid.toInt()) }
+                                mapOf("id" to app["id"], "name" to app["name"], "up" to up, "down" to down)
+                            },
+                        )
+                    }
+                }
+                "appIcon" -> {
+                    val pkg = call.argument<String>("id") ?: ""
+                    val size = call.argument<Int>("size") ?: 96
+                    Thread {
+                        val png = AppUsageMonitor.icon(context, pkg, size)
+                        main.post { result.success(png) }
+                    }.start()
                 }
                 "secureGet" -> result.success(secure!!.get(requireKey(call)))
                 "securePut" -> {

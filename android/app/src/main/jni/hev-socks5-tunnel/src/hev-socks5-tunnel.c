@@ -38,6 +38,7 @@
 #include "hev-socks5-session-tcp.h"
 #include "hev-socks5-session-udp.h"
 
+#include "hev-flow-stats.h"
 #include "hev-socks5-tunnel.h"
 
 enum
@@ -166,6 +167,11 @@ hev_socks5_session_task_entry (void *data)
 
     hev_socks5_session_run (s);
 
+    /* FoxyVPN: the connection's byte counts are final. */
+    hev_flow_stats_close (container_of (hev_socks5_session_get_node (s),
+                                        HevSocks5SessionData, node)
+                              ->flow);
+
     hev_socks5_tunnel_delete_session (hev_socks5_session_get_node (s));
     hev_object_unref (HEV_OBJECT (s));
 }
@@ -196,6 +202,9 @@ tcp_accept_handler (void *arg, struct tcp_pcb *pcb, err_t err)
     }
 
     hev_socks5_session_set_task (HEV_SOCKS5_SESSION (tcp), task);
+    /* FoxyVPN: remote = the app's end, local = where it connects to. */
+    tcp->data.flow = hev_flow_stats_open (6, &pcb->remote_ip, pcb->remote_port,
+                                          &pcb->local_ip, pcb->local_port);
     node = hev_socks5_session_get_node (HEV_SOCKS5_SESSION (tcp));
     hev_socks5_tunnel_insert_session (node);
     hev_task_run (task, hev_socks5_session_task_entry, tcp);
@@ -273,6 +282,9 @@ udp_recv_handler (void *arg, struct udp_pcb *pcb, struct pbuf *p,
     }
 
     hev_socks5_session_set_task (HEV_SOCKS5_SESSION (udp), task);
+    /* FoxyVPN: addr / port = the app's end, local = where it sends to. */
+    udp->data.flow = hev_flow_stats_open (17, addr, port, &pcb->local_ip,
+                                          pcb->local_port);
     node = hev_socks5_session_get_node (HEV_SOCKS5_SESSION (udp));
     hev_socks5_tunnel_insert_session (node);
     hev_task_run (task, hev_socks5_session_task_entry, udp);

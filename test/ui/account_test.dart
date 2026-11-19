@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:foxyvpn/format.dart';
 import 'package:foxyvpn/ui/widgets/foxy_icon.dart';
+import 'package:foxyvpn/ui/widgets/notice_dialogs.dart';
 import 'package:foxyvpn/vpn_controller.dart';
 
 import 'test_support.dart';
@@ -16,13 +17,36 @@ void main() {
     expect(find.text('Firefox account'), findsOneWidget);
   }
 
-  testWidgets('an unlimited account says so on Account and Home, not "50 of 50"', (tester) async {
+  testWidgets('an unlimited account shows this month\'s usage on Home and Account, not "50 of 50"', (tester) async {
     final c = FakeVpnController()..quotaUnlimited = true;
+    c.usage.addTotals(300 * 1024 * 1024, 3 * 1024 * 1024 * 1024);
     await pumpApp(tester, c);
-    expect(find.text('Unlimited data'), findsOneWidget);
+    expect(find.text('Unlimited data'), findsNothing);
+    expect(find.text('3.3 GB this month'), findsOneWidget);
     await tapAndSlide(tester, find.byTooltip('Account'));
-    expect(find.text('Unlimited: Mozilla reports no monthly cap for this account right now.'), findsOneWidget);
+    expect(find.textContaining('Unlimited'), findsNothing);
+    expect(find.text('THIS MONTH'), findsOneWidget);
+    expect(find.text('TODAY'), findsOneWidget);
     expect(find.textContaining('left of'), findsNothing);
+  });
+
+  testWidgets('the Home usage pill opens the Usage page', (tester) async {
+    final c = FakeVpnController()..quotaUnlimited = true;
+    c.usage.addTotals(1024, 4096);
+    await pumpApp(tester, c);
+    await tapAndSlide(tester, find.byTooltip('Usage'));
+    expect(find.text('LAST 7 DAYS'), findsOneWidget);
+    expect(find.text('Download'), findsOneWidget);
+    expect(find.text('Upload'), findsOneWidget);
+    expect(find.text('Counted and kept on this device only.'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('the data card opens the Usage page for accounts with a cap', (tester) async {
+    final c = FakeVpnController();
+    await openAccount(tester, c);
+    await tapAndSlide(tester, find.text('11.0 GB left of 50.0 GB'));
+    expect(find.text('LAST 7 DAYS'), findsOneWidget);
   });
 
   testWidgets('shows the identity, data, rows and version', (tester) async {
@@ -200,24 +224,37 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('sign out is disabled while connected, with a caption saying why', (tester) async {
+  testWidgets('sign out while connected opens a popup instead; Disconnect disconnects', (tester) async {
     final c = FakeVpnController()..connectedFor(const Duration(minutes: 5));
     await openAccount(tester, c);
 
-    expect(find.text('Disconnect first to sign out.'), findsOneWidget);
+    expect(find.text('Disconnect first to sign out.'), findsNothing);
+    expect(find.text(signOutBlockedTitle), findsNothing);
     await tester.tap(find.text('Sign out'));
-    await tester.pump();
+    await tester.pumpAndSettle();
+    expect(find.text(signOutBlockedTitle), findsOneWidget);
+    expect(c.calls, isNot(contains('signOut')));
+
+    await tester.tap(find.text('Disconnect'));
+    await tester.pumpAndSettle();
+    expect(find.text(signOutBlockedTitle), findsNothing);
+    expect(c.calls, contains('disconnect'));
     expect(c.calls, isNot(contains('signOut')));
     expect(find.text('Firefox account'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('sign out is disabled while connecting too', (tester) async {
+  testWidgets('sign out while connecting opens the popup too; Cancel just closes it', (tester) async {
     final c = FakeVpnController()..state = ConnState.connecting;
     await openAccount(tester, c);
     await tester.tap(find.text('Sign out'));
-    await tester.pump();
+    await tester.pumpAndSettle();
+    expect(find.text(signOutBlockedTitle), findsOneWidget);
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    expect(find.text(signOutBlockedTitle), findsNothing);
     expect(c.calls, isNot(contains('signOut')));
+    expect(c.calls, isNot(contains('disconnect')));
   });
 
   testWidgets('sign out when idle returns to the sign-in screen', (tester) async {

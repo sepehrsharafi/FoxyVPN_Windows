@@ -1,10 +1,12 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../format.dart';
 import '../../platform/host.dart';
+import '../../usage_store.dart';
 import '../../vpn_controller.dart';
 import '../theme.dart';
 import '../widgets/app_button.dart';
@@ -13,9 +15,12 @@ import '../widgets/foxy_text_field.dart';
 import '../widgets/foxy_icon.dart';
 import '../widgets/foxy_route.dart';
 import '../widgets/foxy_switch.dart';
+import '../widgets/notice_dialogs.dart';
 import '../widgets/page_header.dart';
 import '../widgets/pressable.dart';
+import '../widgets/usage_chart.dart';
 import 'log_screen.dart';
+import 'usage_screen.dart';
 
 const kAppVersion = '1.0.9';
 
@@ -37,27 +42,39 @@ class _AccountScreenState extends State<AccountScreen> {
 
   VpnController get controller => widget.controller;
 
-  late Listenable _changes = Listenable.merge([controller, controller.stats]);
+  late Listenable _changes = Listenable.merge([controller, controller.stats, controller.usage]);
 
   @override
   void didUpdateWidget(AccountScreen old) {
     super.didUpdateWidget(old);
-    if (old.controller != widget.controller) _changes = Listenable.merge([controller, controller.stats]);
+    if (old.controller != widget.controller) {
+      _changes = Listenable.merge([controller, controller.stats, controller.usage]);
+    }
   }
 
   void _openLicenses(BuildContext context) {
     unawaited(_push.push(context, (_) => const _LicensesPage()));
   }
 
+  void _openUsage(BuildContext context) {
+    unawaited(_push.push(context, (_) => UsageScreen(controller: controller)));
+  }
+
   void _openLog(BuildContext context) {
     unawaited(_push.push(context, (_) => const LogScreen()));
   }
 
-  Future<void> _signOut() async {
+  Future<void> _signOut(BuildContext context) async {
+    final s = controller.state;
+    if (s != ConnState.idle && s != ConnState.preparing) {
+      // Connected, connecting or disconnecting: explain instead of signing out.
+      await showSignOutBlockedDialog(context, controller);
+      return;
+    }
     try {
       await controller.signOut();
     } on StateError {
-      // Connected or connecting: the button is disabled, this is just a race.
+      // The VPN started between the tap and here; nothing to do.
     }
   }
 
@@ -90,12 +107,17 @@ class _AccountScreenState extends State<AccountScreen> {
                               crossAxisAlignment: CrossAxisAlignment.stretch,
                               children: [
                                 _IdentityCard(email: controller.email),
-                                _DataCard(
-                                  remaining: controller.quotaRemaining,
-                                  max: controller.quotaMax,
-                                  resetsAt: controller.quotaResetsAt,
-                                  unlimited: controller.quotaUnlimited,
-                                ),
+                                // Unlimited data: nothing to count down, so the card shows
+                                // what went through the VPN instead.
+                                if (controller.quotaUnlimited)
+                                  _UsageCard(controller: controller, onTap: () => _openUsage(context))
+                                else
+                                  _DataCard(
+                                    remaining: controller.quotaRemaining,
+                                    max: controller.quotaMax,
+                                    resetsAt: controller.quotaResetsAt,
+                                    onUsage: () => _openUsage(context),
+                                  ),
                                 const SizedBox(height: 12),
                                 // Android: the app itself is outside the VPN, but v1 does not
                                 // offer "direct" connections for blocked ports there.
@@ -152,7 +174,7 @@ class _AccountScreenState extends State<AccountScreen> {
                                 // whatever is left (at least 8) so the page fits where it can.
                                 const Spacer(),
                                 const SizedBox(height: 8),
-                                _SignOutRow(enabled: idle, onTap: _signOut),
+                                _SignOutRow(onTap: () => _signOut(context)),
                                 const SizedBox(height: 16),
                                 Row(
                                   mainAxisAlignment: MainAxisAlignment.center,
@@ -248,14 +270,174 @@ class _IdentityCard extends StatelessWidget {
   }
 }
 
-class _DataCard extends StatelessWidget {
-  const _DataCard({required this.remaining, required this.max, required this.resetsAt, this.unlimited = false});
+/// Unlimited accounts: this month's VPN traffic on this device, today's in a
+/// download / upload ring, and the way into the Usage page.
+class _UsageCard extends StatelessWidget {
+  const _UsageCard({required this.controller, required this.onTap});
 
-  /// Mozilla reports no monthly cap for this account right now.
-  final bool unlimited;
+  final VpnController controller;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final split = controller.usage.thisMonthSplit;
+    final month = split.up + split.down;
+    final today = controller.usage.summary(UsageRange.today);
+    final p = bytesParts(month);
+    return AppCard(
+      onTap: onTap,
+      semanticLabel: 'This month: ${formatBytes(month)}, today: ${formatBytes(today.total)}. Open usage',
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text('THIS MONTH', style: FoxyText.section),
+                const SizedBox(height: 6),
+                Text.rich(
+                  TextSpan(
+                    children: [
+                      TextSpan(text: p.value, style: FoxyText.display.copyWith(fontSize: 28, height: 1.1)),
+                      TextSpan(
+                        text: ' ${p.unit}',
+                        style: FoxyText.title.copyWith(color: FoxyColors.textDim),
+                      ),
+                    ],
+                  ),
+                  maxLines: 1,
+                ),
+                const SizedBox(height: 4),
+                Text('Through the VPN on this device', style: FoxyText.caption),
+              ],
+            ),
+          ),
+          const SizedBox(width: 12),
+          _TodayRing(up: today.up, down: today.down),
+          const SizedBox(width: 10),
+          const FoxyIcon(FoxyIcons.chevronRight, size: 18, color: FoxyColors.textFaint),
+        ],
+      ),
+    );
+  }
+}
+
+/// Today's total inside a ring split into today's download and upload.
+class _TodayRing extends StatelessWidget {
+  const _TodayRing({required this.up, required this.down});
+
+  final int up;
+  final int down;
+
+  static const size = 92.0;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = bytesParts(up + down);
+    return SizedBox(
+      width: size,
+      height: size,
+      child: CustomPaint(
+        painter: _RingPainter(up, down),
+        child: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text('TODAY', style: FoxyText.section.copyWith(fontSize: 10, letterSpacing: 1.2)),
+              const SizedBox(height: 4),
+              Text.rich(
+                TextSpan(
+                  children: [
+                    TextSpan(
+                      text: p.value,
+                      style: FoxyText.label.copyWith(fontSize: 18, fontWeight: FontWeight.w800, height: 1),
+                    ),
+                    TextSpan(
+                      text: ' ${p.unit}',
+                      style: FoxyText.caption.copyWith(fontSize: 11, color: FoxyColors.textDim, height: 1),
+                    ),
+                  ],
+                ),
+                maxLines: 1,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Download from 12 o'clock clockwise, then upload; round ends with a small
+/// even gap between the two. Nothing moved yet: a grey ring.
+class _RingPainter extends CustomPainter {
+  _RingPainter(this.up, this.down);
+
+  final int up;
+  final int down;
+
+  static const _stroke = 4.5;
+  static const _gapPx = 3.0; // visible space between the two parts
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final radius = (size.width - _stroke) / 2;
+    final rect = Rect.fromCircle(center: size.center(Offset.zero), radius: radius);
+    Paint pen(Color c) => Paint()
+      ..color = c
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = _stroke
+      ..strokeCap = StrokeCap.round;
+    const full = 2 * math.pi;
+    const start = -math.pi / 2;
+    final total = up + down;
+    if (total <= 0) {
+      canvas.drawArc(rect, 0, full, false, pen(FoxyColors.surfaceHi));
+      return;
+    }
+    // Round caps reach half a stroke past each end of an arc, so each gap is
+    // the visible gap plus one stroke.
+    final gap = (_gapPx + _stroke) / radius;
+    final downSweep = full * down / total;
+    final upSweep = full - downSweep;
+    // A part too small for its own arc (or none at all): one full ring.
+    if (upSweep < gap * 1.6 || downSweep < gap * 1.6) {
+      canvas.drawArc(rect, 0, full, false, pen(downSweep >= upSweep ? UsageColors.download : UsageColors.upload));
+      return;
+    }
+    canvas.drawArc(rect, start + gap / 2, downSweep - gap, false, pen(UsageColors.download));
+    canvas.drawArc(rect, start + downSweep + gap / 2, upSweep - gap, false, pen(UsageColors.upload));
+  }
+
+  @override
+  bool shouldRepaint(_RingPainter old) => old.up != up || old.down != down;
+}
+
+class _DataCard extends StatelessWidget {
+  const _DataCard({required this.remaining, required this.max, required this.resetsAt, required this.onUsage});
+
   final int? remaining;
   final int? max;
   final DateTime? resetsAt;
+
+  /// The whole card opens the Usage page (a chevron says so).
+  final VoidCallback onUsage;
+
+  Widget _card({required Widget child}) => AppCard(
+    onTap: onUsage,
+    semanticLabel: 'Data. Open usage',
+    child: Stack(
+      children: [
+        Padding(padding: const EdgeInsets.only(right: 26), child: child),
+        const Positioned(
+          top: 1,
+          right: 0,
+          child: FoxyIcon(FoxyIcons.chevronRight, size: 18, color: FoxyColors.textFaint),
+        ),
+      ],
+    ),
+  );
 
   @override
   Widget build(BuildContext context) {
@@ -263,23 +445,9 @@ class _DataCard extends StatelessWidget {
     final total = max;
     final reset = resetsAt == null ? null : formatResetDate(resetsAt!.toLocal());
 
-    if (unlimited) {
-      return AppCard(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text('Data left', style: FoxyText.title),
-            const SizedBox(height: 4),
-            Text('Unlimited: Mozilla reports no monthly cap for this account right now.', style: FoxyText.caption),
-          ],
-        ),
-      );
-    }
-
     // Nothing known yet (or the account check failed): the card keeps its place.
     if (left == null && total == null && resetsAt == null) {
-      return AppCard(
+      return _card(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           mainAxisSize: MainAxisSize.min,
@@ -294,7 +462,7 @@ class _DataCard extends StatelessWidget {
 
     final usedUp = left != null && left <= 0;
     if (usedUp) {
-      return AppCard(
+      return _card(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           mainAxisSize: MainAxisSize.min,
@@ -354,7 +522,7 @@ class _DataCard extends StatelessWidget {
     }
     final double? fraction = (left != null && total != null && total > 0) ? (left / total).clamp(0.0, 1.0) : null;
 
-    return AppCard(
+    return _card(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         mainAxisSize: MainAxisSize.min,
@@ -540,10 +708,7 @@ class _RelayCardState extends State<_RelayCard> {
             onChanged: (_) => setState(() => _note = null),
             onSubmitted: (_) => _save(),
           ),
-          if (builtInLine != null) ...[
-            const SizedBox(height: 8),
-            Text(builtInLine, style: FoxyText.caption),
-          ],
+          if (builtInLine != null) ...[const SizedBox(height: 8), Text(builtInLine, style: FoxyText.caption)],
           if (_note != null) ...[
             const SizedBox(height: 8),
             Text(_note!, style: FoxyText.caption.copyWith(color: _error ? FoxyColors.danger : FoxyColors.text)),
@@ -635,48 +800,35 @@ class _SwitchRow extends StatelessWidget {
 }
 
 class _SignOutRow extends StatelessWidget {
-  const _SignOutRow({required this.enabled, required this.onTap});
+  const _SignOutRow({required this.onTap});
 
-  final bool enabled;
   final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    final ink = enabled ? FoxyColors.danger : FoxyColors.danger.withValues(alpha: 0.38);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Pressable(
-          onTap: enabled ? () => unawaited(Future.sync(onTap)) : null,
-          semanticLabel: enabled ? 'Sign out' : 'Sign out, unavailable while connected',
-          builder: (context, s) => PressableBox(
-            state: s,
-            radius: FoxySpace.controlRadius,
-            hover: FoxyColors.danger.withValues(alpha: 0.10),
-            pressed: FoxyColors.danger.withValues(alpha: 0.18),
-            height: 48,
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            child: Row(
-              children: [
-                FoxyIcon(FoxyIcons.signOut, size: 20, color: ink),
-                const SizedBox(width: 16),
-                Expanded(
-                  child: Text(
-                    'Sign out',
-                    style: FoxyText.body.copyWith(color: ink, fontWeight: FontWeight.w500),
-                  ),
-                ),
-              ],
+    return Pressable(
+      onTap: () => unawaited(Future.sync(onTap)),
+      semanticLabel: 'Sign out',
+      builder: (context, s) => PressableBox(
+        state: s,
+        radius: FoxySpace.controlRadius,
+        hover: FoxyColors.danger.withValues(alpha: 0.10),
+        pressed: FoxyColors.danger.withValues(alpha: 0.18),
+        height: 48,
+        padding: const EdgeInsets.symmetric(horizontal: 16),
+        child: Row(
+          children: [
+            const FoxyIcon(FoxyIcons.signOut, size: 20, color: FoxyColors.danger),
+            const SizedBox(width: 16),
+            Expanded(
+              child: Text(
+                'Sign out',
+                style: FoxyText.body.copyWith(color: FoxyColors.danger, fontWeight: FontWeight.w500),
+              ),
             ),
-          ),
+          ],
         ),
-        if (!enabled)
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
-            child: Text('Disconnect first to sign out.', style: FoxyText.caption.copyWith(color: FoxyColors.textDim)),
-          ),
-      ],
+      ),
     );
   }
 }

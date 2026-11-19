@@ -13,6 +13,8 @@
     <!-- Android 13+: lets the ongoing "Protected" notification show. Asked for
          once, before the first connection; the VPN works without it. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Usage page: names and icons of the apps that used the VPN (installed apps are not listed otherwise, Android 11+). -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
 
     <application
         android:name="${applicationName}"

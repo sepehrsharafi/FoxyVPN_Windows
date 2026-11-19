@@ -140,6 +140,7 @@ class FoxyVpnService : VpnService() {
                 throw IllegalStateException("The native tunnel could not be started.")
             }
             hevRunning = true
+            AppUsageMonitor.start(this) // per-app byte counts; never touches the traffic
             if (previousHev) {
                 lastUp = 0 // the new hev counts from zero; the totals carry on
                 lastDown = 0
@@ -359,6 +360,7 @@ class FoxyVpnService : VpnService() {
             } catch (_: Throwable) {
             }
             main.post {
+                AppUsageMonitor.stop()
                 markStopped()
                 leaveForeground()
                 stopSelf()
@@ -388,6 +390,7 @@ class FoxyVpnService : VpnService() {
         } catch (_: Throwable) {
         }
         tun = null
+        AppUsageMonitor.stop()
     }
 
     private fun cancelTimeouts() {
