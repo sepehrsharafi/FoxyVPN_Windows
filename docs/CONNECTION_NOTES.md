@@ -162,8 +162,8 @@ through each location's exit, like v2rayN.
   - armeabi-v7a and x86_64 are static `GOOS=linux` builds, because `GOOS=android` needs cgo
     for them.
 - **`.github/workflows/build.yml`:**
-  - Push to `main` builds Windows (installer + zip, Flutter tests, engine vet/test) and Android.
-  - Push to `main` also builds macOS (dmg + smoke test); Run workflow can untick any system.
+  - For now a push to `main` builds only macOS; Windows and Android only via Run workflow.
+  - macOS: dmg, engine and helper tests, smoke test (tunnel + per-app usage).
   - The macOS dmg step retries `hdiutil` (one transient failure was seen).
 - **Local machine:**
   - Windows Developer Mode is off, so `flutter build windows` fails locally (it needs

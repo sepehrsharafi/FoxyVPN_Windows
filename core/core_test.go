@@ -227,13 +227,27 @@ func TestGoawayRotation(t *testing.T) {
 	}
 	edge.goaway("rotate")
 
+	// The GOAWAY reaches the engine's read loop asynchronously. A flow opened before
+	// that would still (correctly) go on the old connection, which this test edge
+	// accepts (last stream id 0x7fffffff). So wait until the engine has seen it.
+	waitFor(t, "the engine to see the GOAWAY", func() bool {
+		g.up.mu.Lock()
+		defer g.up.mu.Unlock()
+		for _, c := range g.up.conns {
+			if c.cc.State().Closing {
+				return true
+			}
+		}
+		return false
+	})
+
 	// A new flow after the GOAWAY lands on a second connection.
 	c2, r2, reply := g.flow("TCP", "echo.test", "443")
 	if reply != "OK" {
 		t.Fatalf("flow after GOAWAY: %q", reply)
 	}
-	if edge.connCount() != 2 {
-		t.Fatalf("connections after GOAWAY: %d", edge.connCount())
+	if n := edge.connCount(); n != 2 {
+		t.Fatalf("connections after GOAWAY: %d", n)
 	}
 	// The old stream keeps working on the draining connection.
 	for _, p := range []struct {

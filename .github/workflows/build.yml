@@ -1,8 +1,7 @@
 name: Build
 
-# Every push builds Android (APK), Windows (installer, portable zip, and the Flutter tests) and
-# macOS (disk image). Actions > Build > Run workflow builds them on demand; untick a system there
-# to skip it.
+# For now every push builds only macOS (disk image). Android (APK) and Windows (installer,
+# portable zip, Flutter tests) build only from Actions > Build > Run workflow: tick them there.
 
 on:
   push:
@@ -12,11 +11,11 @@ on:
       android:
         description: Build the Android APK
         type: boolean
-        default: true
+        default: false
       windows:
         description: Build Windows (and run the Flutter tests)
         type: boolean
-        default: true
+        default: false
       macos:
         description: Build macOS
         type: boolean
@@ -52,7 +51,7 @@ jobs:
 
   windows:
     needs: analyze
-    if: github.event_name == 'push' || inputs.windows
+    if: github.event_name == 'workflow_dispatch' && inputs.windows
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -310,7 +309,7 @@ jobs:
 
   android:
     needs: analyze
-    if: github.event_name == 'push' || inputs.android
+    if: github.event_name == 'workflow_dispatch' && inputs.android
     runs-on: ubuntu-latest
     env:
       HAS_RELEASE_KEY: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
