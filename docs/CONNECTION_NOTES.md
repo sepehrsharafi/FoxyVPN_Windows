@@ -12,7 +12,7 @@ State as of 2026-11-12 (version 1.0.9). Read this before touching the VPN data p
   challenge, the 451 workaround, the Cloudflare Worker relay, pass fetching and renewal, and
   the server list all stay in Dart. The engine never talks to the relay or to Mozilla's APIs.
 - macOS uses foxy-core too since 2026-11-24 (`Contents/MacOS/foxy-core`, universal), and
-  has per-app usage (see "macOS per-app usage"). CI still builds macOS only on manual runs.
+  has per-app usage (see "macOS per-app usage"). CI builds macOS on every push again.
 - Windows result: no more drops, roughly 2× the speed of the Dart path, and uploads no longer
   freeze downloads. The remaining limits are mostly the user's line and which location is used.
 
@@ -163,7 +163,7 @@ through each location's exit, like v2rayN.
     for them.
 - **`.github/workflows/build.yml`:**
   - Push to `main` builds Windows (installer + zip, Flutter tests, engine vet/test) and Android.
-  - macOS runs only through Actions → Build → Run workflow (default unticked).
+  - Push to `main` also builds macOS (dmg + smoke test); Run workflow can untick any system.
   - The macOS dmg step retries `hdiutil` (one transient failure was seen).
 - **Local machine:**
   - Windows Developer Mode is off, so `flutter build windows` fails locally (it needs
