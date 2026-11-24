@@ -394,7 +394,7 @@ jobs:
   macos:
     needs: analyze
     if: github.event_name == 'push' || inputs.macos
-    runs-on: macos-latest
+    runs-on: macos-15-intel # Intel pool: Apple Silicon runners were out of capacity; the app is still universal
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
