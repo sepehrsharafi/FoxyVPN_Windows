@@ -45,7 +45,15 @@ abstract class TunBackend {
   /// A short status for the user ("Protected · Austria", "Reconnecting…") where
   /// the platform shows one (the Android notification). Optional.
   void setStatus(String text) {}
+
+  /// What each app moved through the tunnel since the last call, where the
+  /// tunnel can tell apps apart (macOS, through the helper); null elsewhere.
+  /// Never throws. After [stop] it still hands over the last counts once.
+  Future<List<AppBytes>?> takeAppUsage() async => null;
 }
+
+/// Bytes one app moved: [id] is an app bundle path, 'system:NAME' or 'other'.
+typedef AppBytes = ({String id, String name, int up, int down});
 
 /// How the controller starts a tunnel. [label] is for the status the platform
 /// shows (Windows ignores it).

@@ -406,11 +406,13 @@ jobs:
           channel: stable
           cache: true
 
-      # The network helper (macos_helper/) is a Go program with no dependencies.
+      # Go builds foxy-core (core/) and the network helper (macos_helper/, only golang.org/x/sys).
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.22'
-          cache: false
+          go-version-file: core/go.mod
+          cache-dependency-path: |
+            core/go.sum
+            macos_helper/go.sum
 
       - run: flutter pub get
 
@@ -428,6 +430,26 @@ jobs:
             exit 1
           fi
           echo "APP=$APP" >> "$GITHUB_ENV"
+
+      # foxy-core: the data-plane engine (core/), universal, next to the app's executable
+      # (lib/tunnel/connector.dart looks for Contents/MacOS/foxy-core).
+      - name: Add foxy-core to the app
+        shell: bash
+        env:
+          CGO_ENABLED: '0'
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/foxycore"
+          mkdir -p "$out"
+          (cd core && go vet -tags http2legacy ./... && go test -tags http2legacy ./...)
+          for arch in arm64 amd64; do
+            (cd core && GOOS=darwin GOARCH="$arch" go build -tags http2legacy -trimpath -ldflags "-s -w" -o "$out/foxy-core-$arch" .)
+          done
+          lipo -create "$out/foxy-core-arm64" "$out/foxy-core-amd64" -output "$APP/Contents/MacOS/foxy-core"
+          chmod 755 "$APP/Contents/MacOS/foxy-core"
+          # lipo drops the signature, and Apple Silicon refuses to run unsigned code.
+          codesign --force --sign - "$APP/Contents/MacOS/foxy-core"
+          (cd macos_helper && go vet ./... && go test ./...)
 
       # The helper and tun2socks (MIT, https://github.com/xjasonlyu/tun2socks) go inside the
       # app, in Contents/Resources/helper. Both are universal (Apple Silicon and Intel).
@@ -487,6 +509,7 @@ jobs:
             case " $archs " in *" x86_64 "*) ;; *) echo "::error::$1 has no x86_64 slice"; exit 1 ;; esac
           }
           need_universal "$APP/Contents/MacOS/FoxyVPN"
+          need_universal "$APP/Contents/MacOS/foxy-core"
           need_universal "$APP/Contents/Resources/helper/foxyvpn-helper"
           need_universal "$APP/Contents/Resources/helper/tun2socks"
 

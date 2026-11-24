@@ -1,6 +1,6 @@
 #!/bin/sh
 # Builds the universal helper: build.sh <outDir>  ->  <outDir>/foxyvpn-helper (ad-hoc signed).
-# Needs macOS (lipo, codesign) and Go 1.22+ on PATH.
+# Needs macOS (lipo, codesign) and Go 1.23+ on PATH.
 set -eu
 if [ "$#" -ne 1 ]; then
     echo "Usage: build.sh <outDir>" >&2

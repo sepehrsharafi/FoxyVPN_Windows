@@ -249,7 +249,7 @@ void main() {
       final tun = await startTun();
       await tun.stop();
       await tun.stop();
-      expect(helper.requests.map((r) => r['cmd']), ['start', 'stop']);
+      expect(helper.requests.map((r) => r['cmd']), ['start', 'appUsage', 'stop']);
       await tun.exited;
       expect(tun.exitMessage, '');
     });

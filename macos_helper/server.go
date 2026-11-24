@@ -216,6 +216,15 @@ func (s *Server) dispatch(c *client, req *request) (res map[string]any) {
 			return fail(req.ID, err.Error())
 		}
 		return infoReply(req.ID, in)
+	case "appUsage":
+		apps, running := s.mgr.TakeAppUsage(c)
+		if apps == nil {
+			apps = []AppTotal{}
+		}
+		m := okReply(req.ID)
+		m["apps"] = apps
+		m["running"] = running
+		return m
 	case "stop":
 		s.mgr.Stop(c)
 		return okReply(req.ID)

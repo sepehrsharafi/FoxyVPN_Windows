@@ -129,6 +129,9 @@ func main() {
 			time.Sleep(100 * time.Millisecond)
 		}
 		if os.Args[7] == "stop" {
+			// What each app moved through the tunnel (the kernel's per-socket counters).
+			uline, _ := c.call(map[string]any{"cmd": "appUsage"})
+			fmt.Println("appusage:", uline)
 			line, m = c.call(map[string]any{"cmd": "stop"})
 			if m["ok"] != true {
 				die("stop failed: %s", line)

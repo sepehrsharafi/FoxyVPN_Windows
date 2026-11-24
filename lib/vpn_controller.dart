@@ -21,6 +21,7 @@ import 'guardian.dart' show QuotaExceeded;
 import 'http_util.dart' show ControlPlane;
 import 'platform/android_bridge.dart';
 import 'platform/host.dart';
+import 'platform/macos_apps.dart';
 import 'platform/macos_helper.dart' show macCleanupStale;
 import 'platform/tun_backend.dart';
 import 'servers.dart';
@@ -1110,7 +1111,7 @@ class VpnController extends ChangeNotifier {
   // Usage history (kept on this device only; see usage_store.dart)
   // ---------------------------------------------------------------------------
 
-  /// What went through the VPN on this device, per day / hour (and per app on Android 10+).
+  /// What went through the VPN on this device, per day / hour (and per app on Android 10+ and macOS).
   final UsageStore usage;
 
   Timer? _usageTimer;
@@ -1140,7 +1141,13 @@ class VpnController extends ChangeNotifier {
     } catch (_) {}
   }
 
+  /// Tunnels that may still hold per-app counts (macOS): the running one, and a
+  /// stopped one until its last counts were taken.
+  final _appUsageTuns = <TunBackend>{};
+
   void _startUsage() {
+    final tun = _tun;
+    if (tun != null) _appUsageTuns.add(tun);
     _usageTimer?.cancel();
     _usageTimer = Timer.periodic(const Duration(seconds: 10), (_) {
       _recordUsage();
@@ -1155,8 +1162,9 @@ class VpnController extends ChangeNotifier {
     _recordUsage();
     _usageSession = null;
     unawaited(usage.flush());
-    // Android hands over the per-app counts of the last connections once its tunnel has stopped.
-    if (_android != null) {
+    // Android (and the macOS helper) hand over the per-app counts of the last
+    // connections once the tunnel has stopped.
+    if (_android != null || _appUsageTuns.isNotEmpty) {
       Timer(const Duration(seconds: 3), () {
         if (!_disposed) unawaited(refreshUsage().then((_) => usage.flush()));
       });
@@ -1166,15 +1174,23 @@ class VpnController extends ChangeNotifier {
   bool _appUsageBusy = false;
 
   /// Brings the numbers up to date now (the Usage page calls this while open):
-  /// the session's bytes, and on Android what each app moved.
+  /// the session's bytes, and on Android and macOS what each app moved.
   Future<void> refreshUsage() async {
     _recordUsage();
     final android = _android;
-    if (android == null || _appUsageBusy) return;
+    if (_appUsageBusy || (android == null && _appUsageTuns.isEmpty)) return;
     _appUsageBusy = true;
     try {
-      final apps = await android.takeAppUsage();
-      if (apps == null || _disposed) return;
+      final apps = <AppBytes>[];
+      if (android != null) {
+        apps.addAll(await android.takeAppUsage() ?? const []);
+      }
+      for (final tun in List.of(_appUsageTuns)) {
+        apps.addAll(await tun.takeAppUsage() ?? const []);
+        // A stopped tunnel has handed over its last counts.
+        if (!identical(tun, _tun)) _appUsageTuns.remove(tun);
+      }
+      if (_disposed) return;
       for (final a in apps) {
         usage.addApp(a.id, a.name, a.up, a.down);
       }
@@ -1185,8 +1201,9 @@ class VpnController extends ChangeNotifier {
     }
   }
 
-  /// Android: an app's icon (PNG) for the Usage page; null elsewhere.
+  /// Android and macOS: an app's icon (PNG) for the Usage page; null elsewhere.
   Future<Uint8List?> appIcon(String id, int size) async {
+    if (Host.isMacOS) return MacApps.instance.appIcon(id, size);
     final android = _android;
     if (android == null) return null;
     try {

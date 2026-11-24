@@ -47,6 +47,8 @@ type platform struct {
 	start     func(path string, args []string) (child, error)
 	killStale func(pid int)
 	exists    func(path string) bool
+	// appUsage starts per-app counting on the tunnel interface (nil: no per-app numbers).
+	appUsage func(iface string, log *Logger) (usageMonitor, error)
 }
 
 func realPlatform() platform {
@@ -83,6 +85,7 @@ func realPlatform() platform {
 		},
 		start:     startProc,
 		killStale: killPid,
+		appUsage:  startAppUsage,
 		exists: func(p string) bool {
 			_, err := os.Stat(p)
 			return err == nil
@@ -108,6 +111,7 @@ type session struct {
 	gateway  string
 	physical string
 	bypass   []string
+	usage    usageMonitor // per-app counting; nil until it runs, or if it cannot
 }
 
 func (s *session) stopWatch() { s.quitOnce.Do(func() { close(s.quit) }) }
@@ -187,6 +191,7 @@ func (m *Manager) Start(owner any, port int, bypass []string, onExit func(string
 	}
 	m.cur = s
 	go m.watch(s)
+	m.startUsage(s)
 	m.log.Printf("tunnel up on %s (gateway %q, physical interface %s)", s.st.Interface, s.gateway, s.iface)
 	return s.info(), nil
 }
@@ -490,6 +495,10 @@ func (m *Manager) teardownLocked() {
 
 func (m *Manager) teardownSession(s *session) {
 	s.stopWatch()
+	if u := s.usage; u != nil {
+		s.usage = nil
+		go u.Close()
+	}
 	m.restore(s.st, s.ch)
 	m.log.Printf("tunnel down (%s)", s.st.Interface)
 }
@@ -575,4 +584,42 @@ loop:
 	if cb != nil {
 		cb(strings.TrimSpace(reason))
 	}
+}
+
+// startUsage starts per-app counting in the background: it never delays or fails the tunnel.
+func (m *Manager) startUsage(s *session) {
+	start := m.pf.appUsage
+	if start == nil {
+		return
+	}
+	go func() {
+		mon, err := start(s.st.Interface, m.log)
+		if err != nil {
+			m.log.Printf("app usage not available: %v", err)
+			return
+		}
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if m.cur != s {
+			go mon.Close() // the session ended meanwhile
+			return
+		}
+		s.usage = mon
+	}()
+}
+
+// TakeAppUsage returns what each app moved through this owner's tunnel since the last call.
+// running is false while there is no per-app counting (not started yet, or not possible).
+func (m *Manager) TakeAppUsage(owner any) (apps []AppTotal, running bool) {
+	m.mu.Lock()
+	var mon usageMonitor
+	if m.cur != nil && m.cur.owner == owner {
+		mon = m.cur.usage
+	}
+	m.mu.Unlock()
+	if mon == nil {
+		return nil, false
+	}
+	apps, err := mon.Take()
+	return apps, err == nil
 }

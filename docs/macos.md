@@ -73,7 +73,8 @@ if you do not plan to use FoxyVPN again.
 
 ## What gets installed
 
-The app itself is `/Applications/FoxyVPN.app`: the Flutter app, plus the helper's files in
+The app itself is `/Applications/FoxyVPN.app`: the Flutter app, its VPN engine
+(`Contents/MacOS/foxy-core`), plus the helper's files in
 `Contents/Resources/helper/` (including tun2socks' licence). The first connect copies them out, as
 administrator, to:
 
@@ -104,6 +105,9 @@ power, it undoes what is left the next time it starts, which is at boot.
 
 ## Good to know
 
+- **Usage** (from the data card under **Account**) shows how much went through the VPN per day,
+  week, month and year, and which apps used it. The network helper reads the per-app numbers from
+  macOS's own network statistics (what Activity Monitor uses). They are kept on this Mac only.
 - Everything runs through the tunnel, including DNS. FoxyVPN sets the DNS servers of your network
   services (**System Settings > Network**) to the VPN's while connected and puts your old ones back on
   disconnect, on a crash and at boot. IPv6 goes through the tunnel as well, so nothing leaks around the
@@ -145,7 +149,7 @@ power, it undoes what is left the next time it starts, which is at boot.
 ## Building it yourself
 
 You need a Mac with Xcode, [Flutter](https://flutter.dev) (the version in
-`.github/workflows/build.yml`) and [Go](https://go.dev) 1.22 or newer.
+`.github/workflows/build.yml`) and [Go](https://go.dev) (the version in `core/go.mod`).
 
 1. `flutter build macos --release` builds `build/macos/Build/Products/Release/FoxyVPN.app`
    (universal, ad-hoc signed by Xcode).
@@ -153,7 +157,9 @@ You need a Mac with Xcode, [Flutter](https://flutter.dev) (the version in
    <https://github.com/xjasonlyu/tun2socks/releases/tag/v2.7.0>, and combine the binaries with
    `lipo -create ... -output tun2socks`, then `codesign --force --sign - tun2socks` (their SHA-256
    checksums are pinned in the workflow).
-3. `bash macos_helper/build.sh <folder>` builds the universal `foxyvpn-helper` into `<folder>`.
+3. `bash macos_helper/build.sh <folder>` builds the universal `foxyvpn-helper` into `<folder>`. In `core/`,
+   build `foxy-core` for `GOOS=darwin` arm64 and amd64 with `-tags http2legacy`, `lipo` them into
+   `FoxyVPN.app/Contents/MacOS/foxy-core` and `codesign --force --sign -` it.
 4. Copy `foxyvpn-helper`, `tun2socks`, `macos_helper/install.sh`, `macos_helper/uninstall.sh`,
    `macos_helper/com.foxyvpn.helper.plist` and the tun2socks LICENSE (as `LICENSE-tun2socks.txt`) into
    `FoxyVPN.app/Contents/Resources/helper/`, and make the first four executable.

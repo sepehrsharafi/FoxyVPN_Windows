@@ -1,6 +1,6 @@
 // Which upstream implementation a connect uses: the foxy-core engine where it
-// is shipped (Windows, Android), otherwise the pure Dart HTTP/2 session
-// (macOS, and whenever the engine is missing or does not start).
+// is shipped (Windows, Android, macOS), otherwise the pure Dart HTTP/2 session
+// (whenever the engine is missing or does not start).
 
 import 'dart:io';
 
@@ -24,6 +24,10 @@ Future<String?> findEngine() async {
     if (Host.isAndroid) {
       final lib = File('${await androidNativeLibraryDir()}/$androidEngineName');
       return lib.existsSync() ? lib.path : null;
+    }
+    if (Host.isMacOS) {
+      final exe = File('${File(Platform.resolvedExecutable).parent.path}/$macosEngineName');
+      return exe.existsSync() ? exe.path : null;
     }
   } catch (e) {
     AppLog.write('Looking for foxy-core failed: $e');

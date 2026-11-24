@@ -154,7 +154,7 @@ CLIENT="$APP/Contents/MacOS/foxyvpn-smoke-client"
 /bin/chmod 755 "$CLIENT"
 HELLO="$("$CLIENT" hello "$SOCKET")" || fail "hello failed: $HELLO"
 echo "hello: $HELLO"
-case "$HELLO" in *'"version":"1"'*) pass "hello reports version 1" ;; *) fail "unexpected hello reply: $HELLO" ;; esac
+case "$HELLO" in *'"version":"2"'*) pass "hello reports version 2" ;; *) fail "unexpected hello reply: $HELLO" ;; esac
 
 # The stranger check: a client outside the app must be refused (hello still works).
 /bin/cp "$WORK/client" "$WORK/outsider"
@@ -239,6 +239,13 @@ check_traffic
 : > "$WORK/release.r2"
 wait "$CLIENT_PID" 2>/dev/null; CLIENT_PID=""
 check_restored 5
+# Per-app usage: curl's bytes through the tunnel, counted by the kernel (ntstat).
+USAGE="$(/usr/bin/grep '^appusage:' "$WORK/client.r2.out" || true)"
+echo "$USAGE"
+case "$USAGE" in
+    *'"id":"system:curl"'*) pass "per-app usage counted curl's traffic through the tunnel" ;;
+    *) echo "helper log:"; /usr/bin/tail -n 20 "$SUPPORT/helper.log" 2>/dev/null; fail "per-app usage did not see curl: $USAGE" ;;
+esac
 
 # ---------------------------------------------------------------- upgrade
 # An app update re-runs install.sh over a running helper.

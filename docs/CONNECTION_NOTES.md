@@ -11,8 +11,8 @@ State as of 2026-11-12 (version 1.0.9). Read this before touching the VPN data p
 - The **control plane is untouched and must stay that way**: sign-in, the 406 edge
   challenge, the 451 workaround, the Cloudflare Worker relay, pass fetching and renewal, and
   the server list all stay in Dart. The engine never talks to the relay or to Mozilla's APIs.
-- macOS still uses the old pure-Dart path, and CI no longer builds macOS on push (manual
-  runs only).
+- macOS uses foxy-core too since 2026-11-24 (`Contents/MacOS/foxy-core`, universal), and
+  has per-app usage (see "macOS per-app usage"). CI still builds macOS only on manual runs.
 - Windows result: no more drops, roughly 2× the speed of the Dart path, and uploads no longer
   freeze downloads. The remaining limits are mostly the user's line and which location is used.
 
@@ -69,13 +69,12 @@ Android: apps -> VpnService TUN -> hev-socks5-tunnel -> 127.0.0.1:<engine socks 
   - Renews the pass on `auth_failed`, and adds the engine's `stats` to the byte counters used
     by the speed display and the quota.
 - **Dart `LocalSocksServer` (`lib/tunnel/socks_server.dart`):** still started, but only used
-  in three cases:
-  - on macOS;
+  in two cases:
   - when "direct fallback" is enabled (Windows setting);
   - when the engine is missing or fails to start (automatic fallback, which logs
     `foxy-core did not start (...); using the built-in HTTP/2 client`).
 - **Old Dart HTTP/2 upstream (`lib/tunnel/upstream.dart` + vendored `third_party/http2`):**
-  kept for macOS and as the fallback. It has our patches 1–12 (see
+  kept as the fallback. It has our patches 1–12 (see
   `third_party/http2/PATCHES.md`).
 
 ### Engine process protocol (`core/`, spec details in the code comments)
@@ -133,9 +132,23 @@ through each location's exit, like v2rayN.
   - **Edge IP:** connected -> `VpnSession.upstreamAddress` (only the pinned IP has a bypass route).
     Disconnected -> resolved like connect does (`UpstreamSession.resolveIPv4` of the first
     server's host).
-  - **Fallback:** no engine (macOS), no usable pass, the probe failing at once, or the edge
+  - **Fallback:** no engine, no usable pass, the probe failing at once, or the edge
     rejecting the pass for every location -> the old TCP ping, and the page says "Connection time
     only". While connected, a TCP-only round is not run (it would go through the tunnel).
+
+### macOS per-app usage (`macos_helper/appusage*.go`, helper version 2)
+
+- No change to the engine or tun2socks. The root helper reads the kernel's per-socket counters
+  (`com.apple.network.statistics` kernel control, XNU `bsd/net/ntstat.h`; what nettop uses) and
+  keeps only sockets whose interface is the session's utun. Providers: TCP and UDP, kernel and
+  userland (QUIC left out: its bytes are already in its UDP socket).
+- Owner: `epid` (the app a WebKit / nsurlsessiond helper works for) else `pid`, path from
+  `kern.procargs2`, then the outermost `.app` bundle (id = bundle path) or `system:<name>`.
+- App protocol: `{"cmd":"appUsage"}` -> `{"apps":[{id,name,up,down}],"running":bool}`, bytes since
+  the last call. `MacTun.stop()` takes the last counts before `stop`. Icons come from the
+  `foxyvpn/apps` channel (`AppIconChannel` in `macos/Runner/MainFlutterWindow.swift`).
+- Struct offsets checked against macOS 12 to 26 headers; a descriptor that does not look right
+  (sockaddr check) is skipped. Any failure only hides the apps list.
 
 ## Build and CI
 
@@ -280,9 +293,9 @@ through each location's exit, like v2rayN.
 2. **Engine SOCKS port after a crash:** if `--socks-port` cannot be re-bound, the reconnect
    fails (logged `Engine SOCKS port changed`). Following the new port means restarting
    tun2socks/hev and the Wintun setup; judged too risky for now.
-3. **macOS:** still on the Dart path, and CI is paused for it. When resumed, ship foxy-core in
-   the app bundle (darwin arm64/amd64) and enable the engine SOCKS path for macOS in
-   `VpnSession.engineSocksPlatform`.
+3. **macOS on a real Mac:** the engine path and per-app usage (2026-11-24) are tested on Windows
+   (unit tests, darwin cross-builds) and in the macOS CI smoke test only. Check the app log and
+   `helper.log` (`app usage: counting on utunN`) on the first real run.
 4. **Licensing:**
    - FoxyVPN is MIT. The engine uses only BSD/MIT deps (x/net, uTLS, Go stdlib).
    - Arman's code is GPL-3.0. Do not copy from it; reading it for ideas is fine.

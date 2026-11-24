@@ -20,7 +20,7 @@ import 'windows_tun.dart' show TunError;
 
 /// Bump together with HelperVersion in macos_helper/version.go (a test checks
 /// they are equal). The app then reinstalls the helper (one password prompt).
-const macHelperVersion = '1';
+const macHelperVersion = '2';
 
 const macHelperSocketPath = '/var/run/com.foxyvpn.helper.sock';
 
@@ -213,6 +213,28 @@ class MacHelperClient {
   }
 }
 
+/// The `apps` of the helper's appUsage reply: [{id, name, up, down}, ...].
+/// Anything malformed is skipped.
+List<AppBytes> parseMacAppUsage(Object? apps) {
+  if (apps is! List) return const [];
+  final out = <AppBytes>[];
+  for (final a in apps) {
+    if (a is! Map) continue;
+    final id = a['id'];
+    final name = a['name'];
+    final up = a['up'];
+    final down = a['down'];
+    if (id is! String || id.isEmpty) continue;
+    out.add((
+      id: id,
+      name: name is String ? name : '',
+      up: up is num && up > 0 ? up.toInt() : 0,
+      down: down is num && down > 0 ? down.toInt() : 0,
+    ));
+  }
+  return out;
+}
+
 /// The helper only takes IPv4 unicast addresses, never these ranges (the
 /// tunnel's own, loopback, multicast, reserved, broadcast).
 bool isMacBypassAllowed(InternetAddress a) {
@@ -324,12 +346,44 @@ class MacTun {
     }
   }
 
+  /// Counts taken from the helper but not yet handed to the app (the last ones, at stop).
+  final _appBacklog = <AppBytes>[];
+
+  /// Per-app bytes since the last call (the helper counts them on the utun, see
+  /// macos_helper/appusage.go). Never throws; an empty list while the helper has
+  /// nothing (yet). After [stop], the counts taken just before it, once.
+  Future<List<AppBytes>> takeAppUsage() async {
+    final stopping = _stopFuture;
+    if (stopping != null) {
+      await stopping.timeout(const Duration(seconds: 15), onTimeout: () {});
+    } else if (!_client.isClosed) {
+      _appBacklog.addAll(await _requestAppUsage());
+    }
+    final out = List<AppBytes>.of(_appBacklog);
+    _appBacklog.clear();
+    return out;
+  }
+
+  Future<List<AppBytes>> _requestAppUsage() async {
+    try {
+      // Short: a disconnect must not wait long on a busy helper.
+      final limit = _client.requestTimeout < const Duration(seconds: 3)
+          ? _client.requestTimeout
+          : const Duration(seconds: 3);
+      return parseMacAppUsage((await _client.request('appUsage', const {}, limit))['apps']);
+    } catch (e) {
+      return const []; // an older helper, or it is busy: the totals do not depend on this
+    }
+  }
+
   /// Stops the tunnel and closes the connection. Safe to call more than once.
   Future<void> stop() => _stopFuture ??= _stop();
 
   Future<void> _stop() async {
     _stopRequested = true;
     if (!_client.isClosed) {
+      // The last per-app counts: the helper forgets them with the tunnel.
+      _appBacklog.addAll(await _requestAppUsage());
       try {
         await _client.request('stop');
       } catch (e) {
@@ -370,6 +424,9 @@ class MacTunBackend extends TunBackend {
 
   @override
   Future<void> stop() => _tun.stop();
+
+  @override
+  Future<List<AppBytes>?> takeAppUsage() => _tun.takeAppUsage();
 
   static Future<TunBackend> start({
     required int socksPort,

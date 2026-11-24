@@ -20,6 +20,9 @@ import 'upstream.dart';
 const windowsEngineName = 'foxy-core.exe';
 const androidEngineName = 'libfoxycore.so';
 
+/// macOS: next to the app's own executable, in FoxyVPN.app/Contents/MacOS.
+const macosEngineName = 'foxy-core';
+
 /// Starts the engine process; replaced in tests.
 typedef EngineStarter = Future<Process> Function(String executable, List<String> arguments);
 

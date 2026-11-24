@@ -139,9 +139,9 @@ void main() {
     await session.stop();
   });
 
-  for (final (os, expectEngine) in [(HostOs.android, true), (HostOs.windows, true), (HostOs.macos, false)]) {
+  for (final (os, expectEngine) in [(HostOs.android, true), (HostOs.windows, true), (HostOs.macos, true)]) {
     test('default platform check on $os: engine SOCKS = $expectEngine', () async {
-      VpnSession.engineSocksPlatform = () => Host.isWindows || Host.isAndroid;
+      VpnSession.engineSocksPlatform = () => Host.isWindows || Host.isAndroid || Host.isMacOS;
       Host.debugOverride = os;
       addTearDown(() => Host.debugOverride = null);
       final session = await start();

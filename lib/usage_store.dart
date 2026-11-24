@@ -34,7 +34,7 @@ class UsageBucket {
 class AppUsage {
   const AppUsage({required this.id, required this.name, required this.up, required this.down});
 
-  /// The Android package name, or 'other' / 'system:NAME'.
+  /// The Android package name or macOS app bundle path, or 'other' / 'system:NAME'.
   final String id;
   final String name;
   final int up;

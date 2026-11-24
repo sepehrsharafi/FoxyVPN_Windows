@@ -33,7 +33,7 @@ const _monthsLong = [
 ];
 
 /// How much went through the VPN on this device: a range switch, the total,
-/// a bar per hour / day / month, and (Android 10+) the apps that used it.
+/// a bar per hour / day / month, and (Android 10+, macOS) the apps that used it.
 class UsageScreen extends StatefulWidget {
   const UsageScreen({super.key, required this.controller});
 
@@ -169,7 +169,7 @@ class _UsageScreenState extends State<UsageScreen> {
                             onShowAll: () => setState(() => _allApps = true),
                             loadIcon: controller.appIcon,
                           ),
-                        ] else if (Host.isAndroid) ...[
+                        ] else if (Host.isAndroid || Host.isMacOS) ...[
                           const SizedBox(height: 20),
                           Text(
                             'Apps that use the VPN show up here once they move data.',

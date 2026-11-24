@@ -44,8 +44,8 @@ class VpnSession {
   /// How upstream connections are made; replaced in tests.
   static UpstreamConnector connector = defaultUpstreamConnector;
 
-  /// Whether the tunnel can use the engine's SOCKS server (Windows, Android; not macOS); replaced in tests.
-  static bool Function() engineSocksPlatform = () => Host.isWindows || Host.isAndroid;
+  /// Whether the tunnel can use the engine's SOCKS server (Windows, Android, macOS); replaced in tests.
+  static bool Function() engineSocksPlatform = () => Host.isWindows || Host.isAndroid || Host.isMacOS;
 
   VpnSession._(this._account, this._log, this._beforeReconnect, this._directFallback);
 
@@ -203,7 +203,7 @@ class VpnSession {
       );
     }
     _pinned = upstream.address;
-    // Windows and Android: the tunnel talks to the engine's own SOCKS5 server, not to Dart.
+    // Windows, Android and macOS: the tunnel talks to the engine's own SOCKS5 server, not to Dart.
     if (engineSocksPlatform() && !_directFallback && upstream is EngineUpstream && upstream.socksPort != null) {
       _engineSocksPort = upstream.socksPort;
     }
